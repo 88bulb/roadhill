@@ -5,7 +5,7 @@
 系统启动后搜索特殊ap名称，如有名称内包含`roadhill_testing`字符的ap，则进入工程模式，否则进入生产模式。
 
 - 在生产模式下，设备连接指定的ssid名称的ap（ssid名称和密码均保存在nvs内，不hardcode在代码里），然后tcp连接云服务器；
-- 在工程模式下，设备连接含`roadhill_testing`字符的ap，并直接以gateway的6015端口作为模拟云的tcp连接工作；
+- 在工程模式下，设备连接含`roadhill_testing`字符的ap，并直接以gateway的`6015`端口作为模拟云的tcp连接工作；
 - 两种情况下使用同样的tcp协议和http协议，其中tcp协议为长连接，http协议用于下载mp3文件，对于工程模式，本地模拟云的服务器（mock server）需要实现两种协议服务；
 - 无论是生产模式还是工程模式，系统wifi（指wrover模块）都工作在sta+ap模式下，其中ap使用的ssid名称为`roadhill_${xxxxxx}`，其中`xxxxxx`是bulbboot协议中的group id；
 
@@ -155,9 +155,53 @@ cloud->gateway
 
 
 
+## 实现
+
+和`bulbboot`一样，`roadboot`项目负责升级和启动`roadhill`固件，`roadhill`固件只负责下载播放功能。
 
 
 
+## roadboot
+
+`roadboot`目前采用最小化设计，仅idf项目（即不包含音频功能），也不处理按键和C3模块，这些都是`roadhill`功能。
 
 
+
+`roadboot`仅工作在wifi sta模式下，启动后通过扫描，寻求连接ssid包含`roadhill_test`或`roadhill_prod`（本文档中最终连接的ssid名称和密码均使用`roadhill_prod`代替）的ap，如果发现则使用和token相同的字符串做密码去连接。
+
+
+
+连接成功后，使用`GET`访问预定义的http服务，通过query string提交设备的型号（`juwanke-gateway-speaker-01`），硬件版本号（`a1`），firmware版本（`01000000`），设备id（使用mac），获得返回的json。
+
+```json
+{
+    "url":"http url",
+    "size": 123456,
+    "sha256": "the last 32 bytes in hex code"
+}
+```
+
+
+
+如果成功获得该返回结果，`roadboot`比对当前的ota1固件的hash是否一致，如果不一致则下载指定固件安装，否则启动该固件。
+
+
+
+如果连接的是本地的服务，即`roadhill_test`的gateway，boot url使用：
+
+```
+GET http://<gateway ip>/gateway/boot?model=juwanke-gateway-speaker-01&rev=a1&fw=01000000&mac=1234567890ab
+```
+
+
+
+**TODO**
+
+- [ ] 应该有声音播放反馈；
+- [ ] 生产环境的HTTP的URL定义；
+- [ ] 应实际校验固件，因为有可能在刷入新固件过程中，未能擦除旧固件的hash，如果因为某种原因云决定回卷到旧固件，如果没有校验只是读取了hash后启动，则可能陷入死循环；
+
+
+
+## roadhill
 
