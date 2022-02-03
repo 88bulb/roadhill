@@ -1,0 +1,59 @@
+diff --git a/components/driver/esp32c3/rtc_tempsensor.c b/components/driver/esp32c3/rtc_tempsensor.c
+index d77b75e902..baec73bc3a 100644
+--- a/components/driver/esp32c3/rtc_tempsensor.c
++++ b/components/driver/esp32c3/rtc_tempsensor.c
+@@ -111,6 +111,7 @@ esp_err_t temp_sensor_stop(void)
+ {
+     APB_SARADC.apb_tsens_ctrl.tsens_pu = 0;
+     APB_SARADC.apb_tsens_ctrl2.tsens_clk_sel = 0;
++    tsens_hw_state = TSENS_HW_STATE_UNCONFIGURED;
+     return ESP_OK;
+ }
+ 
+diff --git a/components/fatfs/src/ffconf.h b/components/fatfs/src/ffconf.h
+index 6578122c5f..59681a56f0 100644
+--- a/components/fatfs/src/ffconf.h
++++ b/components/fatfs/src/ffconf.h
+@@ -252,7 +252,7 @@
+ /  buffer in the filesystem object (FATFS) is used for the file data transfer. */
+ 
+ 
+-#define FF_FS_EXFAT		0
++#define FF_FS_EXFAT		1
+ /* This option switches support for exFAT filesystem. (0:Disable or 1:Enable)
+ /  To enable exFAT, also LFN needs to be enabled. (FF_USE_LFN >= 1)
+ /  Note that enabling exFAT discards ANSI C (C89) compatibility. */
+diff --git a/components/fatfs/vfs/vfs_fat.c b/components/fatfs/vfs/vfs_fat.c
+index 1ce28a1670..7738f800bf 100644
+--- a/components/fatfs/vfs/vfs_fat.c
++++ b/components/fatfs/vfs/vfs_fat.c
+@@ -538,7 +538,7 @@ static off_t vfs_fat_lseek(void* ctx, int fd, off_t offset, int mode)
+         return -1;
+     }
+ 
+-    ESP_LOGD(TAG, "%s: offset=%ld, filesize:=%d", __func__, new_pos, f_size(file));
++    ESP_LOGD(TAG, "%s: offset=%ld, filesize:=%llu", __func__, new_pos, f_size(file));
+     FRESULT res = f_lseek(file, new_pos);
+     if (res != FR_OK) {
+         ESP_LOGD(TAG, "%s: fresult=%d", __func__, res);
+diff --git a/components/fatfs/vfs/vfs_fat_sdmmc.c b/components/fatfs/vfs/vfs_fat_sdmmc.c
+index 8917a1504d..c25bef177f 100644
+--- a/components/fatfs/vfs/vfs_fat_sdmmc.c
++++ b/components/fatfs/vfs/vfs_fat_sdmmc.c
+@@ -99,6 +99,7 @@ static esp_err_t mount_to_vfs_fat(const esp_vfs_fat_mount_config_t *mount_config
+     // connect FATFS to VFS
+     err = esp_vfs_fat_register(base_path, drv, mount_config->max_files, &fs);
+     if (err == ESP_ERR_INVALID_STATE) {
++	ESP_LOGI(TAG, "esp_vfs_fat_register invalid (but it's ok");
+         // it's okay, already registered with VFS
+     } else if (err != ESP_OK) {
+         ESP_LOGD(TAG, "esp_vfs_fat_register failed 0x(%x)", err);
+@@ -164,7 +165,7 @@ static esp_err_t partition_card(const esp_vfs_fat_mount_config_t *mount_config,
+                 card->csd.sector_size,
+                 mount_config->allocation_unit_size);
+     ESP_LOGW(TAG, "formatting card, allocation unit size=%d", alloc_unit_size);
+-    res = f_mkfs(drv, FM_ANY, alloc_unit_size, workbuf, workbuf_size);
++    res = f_mkfs(drv, FM_EXFAT, alloc_unit_size, workbuf, workbuf_size);
+     if (res != FR_OK) {
+         err = ESP_FAIL;
+         ESP_LOGD(TAG, "f_mkfs failed (%d)", res);
