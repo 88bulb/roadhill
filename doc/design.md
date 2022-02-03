@@ -163,6 +163,10 @@ cloud->gateway
 
 ## roadboot
 
+本节内容无效，即将merge进roadhill，改用乐鑫官方的a/b升级方式。
+
+
+
 `roadboot`目前采用最小化设计，仅idf项目（即不包含音频功能），也不处理按键和C3模块，这些都是`roadhill`功能。
 
 
