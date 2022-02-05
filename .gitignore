@@ -5,3 +5,5 @@ files/
 node_modules/
 sdkconfig.old
 
+main/default.c
+
