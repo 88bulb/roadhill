@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_ota_ops.h"
+#include "esp_https_ota.h"
 #include "nvs_flash.h"
 
 #include "esp_netif.h"
@@ -27,7 +28,12 @@ static const char *TAG = "roadhill:main";
 
 const char hex_char[16] = "0123456789abcdef";
 
-static EventGroupHandle_t events;
+typedef enum {
+    IP_ACQUIRED = 0,
+    OTA_REQUESTED,
+} bits_enum_t;
+
+static EventGroupHandle_t bits;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -65,6 +71,27 @@ static const char device_info_tmpl[] =
     "{\"hardware\":{\"codename\":\"roadhill\",\"revision\":\"**\"},"
     "\"firmware\":{\"version\":\"00000000\",\"sha256\":\"0000000000000000000000"
     "000000000000000000000000000000000000000000\"}}\n";
+
+typedef enum {
+    CMD_UNDEFINED = 0,
+    CMD_OTA,
+    CMD_PREPARE,
+    CMD_PLAY,
+    CMD_STOP,
+} command_enum_t;
+
+typedef struct {
+    char url[1024];
+} ota_command_data_t;
+
+typedef struct {
+    command_enum_t type;
+    union {
+        ota_command_data_t ota;
+    } data;
+} command_t;
+
+static command_t *command = NULL;
 
 static bool is_semver(const char *str) {
     if (strlen(str) != 8)
@@ -119,18 +146,32 @@ static void prepare_device_info() {
 }
 
 static int process_line() {
-    ESP_LOGI(TAG, "line: %s", line);
+    int err = 0;
+    ESP_LOGI(TAG, "process line: %s", line);
     cJSON *root = cJSON_Parse(line);
-    // should we raise error if not parsed correctly? TODO
     if (root) {
+        command->type = CMD_UNDEFINED;
+
         char *cmd = cJSON_GetObjectItem(root, "cmd")->valuestring;
         if (0 == strcmp(cmd, "ota")) {
-            char *url = cJSON_GetObjectItem(root, "url")->valuestring; 
-            ESP_LOGI(TAG, "ota url: %s", url);
+            command->type = CMD_OTA;
+            command->data.ota.url[0] = '\0';
+            char *url = cJSON_GetObjectItem(root, "url")->valuestring;
+            if (url) {
+                strlcpy(command->data.ota.url, url,
+                        sizeof(command->data.ota.url));
+                ESP_LOGI(TAG, "ota url: %s", command->data.ota.url);
+            } else {
+                err = -1;
+                command->type = CMD_UNDEFINED;
+                ESP_LOGI(TAG, "invalid ota url");
+            }
         }
         cJSON_Delete(root);
+    } else {
+        err = -1; // invalid json
     }
-    return 0;
+    return err;
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -155,13 +196,138 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == IP_EVENT) {
         switch (event_id) {
         case IP_EVENT_STA_GOT_IP:
-            xEventGroupSetBits(events, (EventBits_t)1);
+            xEventGroupSetBits(bits, (EventBits_t)1);
             break;
         case IP_EVENT_STA_LOST_IP:
-            xEventGroupClearBits(events, (EventBits_t)1);
+            xEventGroupClearBits(bits, (EventBits_t)1);
             break;
         default:
             break;
+        }
+    }
+}
+
+esp_err_t ota_http_event_handler(esp_http_client_event_t *evt) {
+    switch (evt->event_id) {
+    case HTTP_EVENT_ERROR:
+        ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+        break;
+    case HTTP_EVENT_ON_CONNECTED:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+        break;
+    case HTTP_EVENT_HEADER_SENT:
+        ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+        break;
+    case HTTP_EVENT_ON_HEADER:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key,
+                 evt->header_value);
+        break;
+    case HTTP_EVENT_ON_DATA:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+        break;
+    case HTTP_EVENT_ON_FINISH:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+        break;
+    case HTTP_EVENT_DISCONNECTED:
+        ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
+        break;
+    }
+    return ESP_OK;
+}
+
+static void tcp_connection(void *arg) {
+    esp_err_t err;
+
+    // (re-)connection in loop
+    while (1) {
+        xEventGroupWaitBits(bits, (EventBits_t)1, pdFALSE, pdFALSE,
+                            portMAX_DELAY);
+
+        esp_netif_ip_info_t ip_info;
+        err = esp_netif_get_ip_info(sta_netif, &ip_info);
+        if (err != ESP_OK) {
+            ESP_LOGI(TAG, "failed to get ip info");
+            goto closed;
+        }
+
+        int tcp_port = 8080;
+
+        struct sockaddr_in dest_addr;
+        dest_addr.sin_addr.s_addr = ip_info.gw.addr;
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(tcp_port);
+        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+        if (sock < 0) {
+            ESP_LOGI(TAG, "failed to create socket");
+            goto closed;
+        }
+
+        err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (err < 0) {
+            ESP_LOGI(TAG, "failed to connect to tcp server (%d)", errno);
+            goto closing;
+        } else {
+            ESP_LOGI(TAG, "connected to tcp server");
+        }
+
+        prepare_device_info();
+
+        if (tx_len) {
+            int start = 0;
+            while (1) {
+                int sent = send(sock, &tx_buf[start], tx_len - start, 0);
+                if (sent < 0) {
+                    ESP_LOGI(TAG, "send error (%d)", errno);
+                    goto closing;
+                }
+                start += sent;
+                if (start < tx_len) {
+                    vTaskDelay(0);
+                } else {
+                    break;
+                }
+            };
+        }
+
+        while (1) {
+            int len = recv(sock, rx_buf, sizeof(rx_buf), 0);
+            if (len < 0) {
+                ESP_LOGI(TAG, "recv error (%d)", errno);
+                goto closing;
+            }
+
+            for (int i = 0; i < len; i++) {
+                if (rx_buf[i] == '\r' || rx_buf[i] == '\n') {
+                    if (llen > 0) {
+                        line[llen] = '\0';
+                        if (process_line() || command->type == CMD_UNDEFINED) {
+                            goto closing;
+                        }
+
+                        if (command->type == CMD_OTA) {
+                            goto closing;
+                        }
+
+                        llen = 0;
+                    }
+                } else {
+                    line[llen++] = rx_buf[i];
+                    if (llen >= LINE_LENGTH - 1) {
+                        ESP_LOGI(TAG, "received line too long");
+                        goto closing;
+                    }
+                }
+            }
+        }
+
+    closing:
+        close(sock);
+    closed:
+        if (command->type == CMD_OTA) {
+            xEventGroupSetBits(bits, (EventBits_t)2);
+            vTaskDelay(portMAX_DELAY);
+        } else {
+            vTaskDelay(8000 / portTICK_PERIOD_MS);
         }
     }
 }
@@ -172,10 +338,12 @@ void app_main(void) {
     esp_err_t err;
     int i, j;
 
-    events = xEventGroupCreate();
+    bits = xEventGroupCreate();
 
     line = (char *)malloc(LINE_LENGTH);
     memset(line, 0, LINE_LENGTH);
+
+    command = (command_t *)malloc(sizeof(command_t));
 
     // init nvs
     err = nvs_flash_init();
@@ -304,86 +472,23 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // (re-)connection in loop
-    while (1) {
-        xEventGroupWaitBits(events, (EventBits_t)1, pdFALSE, pdFALSE,
-                            portMAX_DELAY);
+    xTaskCreate(tcp_connection, "tcp_connection", 4096, NULL, 10, NULL);
 
-        esp_netif_ip_info_t ip_info;
-        err = esp_netif_get_ip_info(sta_netif, &ip_info);
-        if (err != ESP_OK) {
-            ESP_LOGI(TAG, "failed to get ip info");
-            goto closed;
-        }
+    // OTA CMD
+    xEventGroupWaitBits(bits, (EventBits_t)2, pdFALSE, pdFALSE, portMAX_DELAY);
 
-        int tcp_port = 8080;
+    esp_http_client_config_t config = {
+        .url = command->data.ota.url,
+//        .cert_pem = (char *)server_cert_pem_start,
+        .event_handler = ota_http_event_handler,
+        .keep_alive_enable = true,
+    };
 
-        struct sockaddr_in dest_addr;
-        dest_addr.sin_addr.s_addr = ip_info.gw.addr;
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(tcp_port);
-        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-        if (sock < 0) {
-            ESP_LOGI(TAG, "failed to create socket");
-            goto closed;
-        }
-
-        err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-        if (err < 0) {
-            ESP_LOGI(TAG, "failed to connect to tcp server (%d)", errno);
-            goto closing;
-        } else {
-            ESP_LOGI(TAG, "connected to tcp server");
-        }
-
-        prepare_device_info();
-
-        if (tx_len) {
-            int start = 0;
-            while (1) {
-                int sent = send(sock, &tx_buf[start], tx_len - start, 0);
-                if (sent < 0) {
-                    ESP_LOGI(TAG, "send error (%d)", errno);
-                    goto closing;
-                }
-                start += sent;
-                if (start < tx_len) {
-                    vTaskDelay(0);
-                } else {
-                    break;
-                }
-            };
-        }
-
-        while (1) {
-            int len = recv(sock, rx_buf, sizeof(rx_buf), 0);
-            if (len < 0) {
-                ESP_LOGI(TAG, "recv error (%d)", errno);
-                goto closing;
-            }
-
-            for (int i = 0; i < len; i++) {
-                if (rx_buf[i] == '\r' || rx_buf[i] == '\n') {
-                    if (llen > 0) {
-                        line[llen] = '\0';
-                        if (process_line()) {
-                            goto closing;
-                        }
-                        llen = 0;
-                    }
-                } else {
-                    line[llen++] = rx_buf[i];
-                    if (llen >= LINE_LENGTH - 1) {
-                        ESP_LOGI(TAG, "received line too long");
-                        goto closing;
-                    }
-                }
-            }
-        }
-
-    closing:
-        close(sock);
-    closed:
-        vTaskDelay(8000 / portTICK_PERIOD_MS);
+    err = esp_https_ota(&config);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "ota succeeded");
+    } else {
+        ESP_LOGI(TAG, "ota failed, %s", esp_err_to_name(err));
     }
+    esp_restart();
 }
