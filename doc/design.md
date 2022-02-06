@@ -1,5 +1,14 @@
 # Design
 
+## Naming Convention
+
+很多restful api设计实践采用了[Zalando restful api guidelines](https://opensource.zalando.com/restful-api-guidelines/#json-guidelines)的命名方法，对本文档而言主要是：
+
+- 使用`snake_case`命名json的property，例如`bulb_firmware`；
+- 使用`UPPER_CASE`命名枚举类型的string，例如`DEVICE_INFO`；
+
+
+
 ## 生产模式和工程模式
 
 系统启动后搜索特殊ap名称，如有名称内包含`roadhill_testing`字符的ap，则进入工程模式，否则进入生产模式。
@@ -13,7 +22,9 @@
 
 ## TCP协议与设备状态
 
-从服务器的角度看，gateway只有两种状态：`PLAYING`和`STOPPED`。通讯上，不设计类似rpc的应答协议，但gateway会持续向服务器报告自己的状态，在状态的定义里可以包含诸如`last_command`成员，记录最后收到的命令，和命令的执行结果，如果有错误，则记录在这里。
+从服务器的角度看，网关只有两种状态：`PLAYING`和`STOPPED`。
+
+通讯上，不设计类似rpc的应答协议，但网关会持续向服务器报告自己的状态，在状态的定义里可以包含诸如`last_command`成员，记录最后收到的命令，和命令的执行结果，如果有错误，则记录在这里。
 
 gateway也会报告自己的状态，是在播放还是已经停止，在播放状态下还可以有更细节的状态，例如播放的进度，下载缓冲的进度等等；如果服务器有需要可以利用这些信息更新客户端的显示。gateway报告自己的状态的时间间隔自己决定，但有最长时间限制；原则上在收到命令后，和出现重要状态变化时，例如缓冲达到一定容量开始播放时，gateway应尽快向服务器报告自己的状态；服务器可以发送`PING`命令要求gateway立刻报告状态，如果在规定时间内没有收到应答，可以视为gateway死机或者通讯故障；但`PING`命令主要用于开发测试，在生产环境中并无业务需求需要使用此命令。
 
@@ -21,7 +32,7 @@ gateway也会报告自己的状态，是在播放还是已经停止，在播放�
 
 服务器向gateway发送的命令仅有4种：
 
-1. PREPARE
+1. SET_SESSION
 2. PLAY
 3. STOP
 4. QUIT
@@ -31,11 +42,11 @@ Gateway向服务器报告的信息有两种：
 1. 设备信息
 2. 状态信息
 
-其中设备信息（DeviceInfo）仅在刚刚开始建立连接时报告一次，之后仅报告状态信息（StateInfo）；
+其中设备信息（`DEVICE_INFO`）仅在刚刚开始建立连接时报告一次，之后仅报告状态信息（StateInfo）；
 
 
 
-### 握手
+### Handshake
 
 1. 建立tcp连接后，gateway首先发送设备信息（DeviceInfo）；
 2. 云向设备发送的第一个命令必须是`PREPARE`，包含组成员（灯）信息；此时云可以假设gateway的初始状态为`STOPPED`；
@@ -43,56 +54,139 @@ Gateway向服务器报告的信息有两种：
 
 
 
-### DeviceInfo
+### DEVICE_INFO
 
-gateway -> cloud
+网关发送给云。`DEVICE_INFO`必须是网关连接云后第一个向云发送的消息。
 
 ```json
 {
-    "hardware": {
-    	"codename": "roadhill",
-        "revision": "a0"
-	},
-    "firmware": {
-        "version": "01000000"
+    "type":"DEVICE_INFO",
+    "hardware":{
+        "codename":"roadhill",
+        "revision":"a0"
+    },
+    "firmware":{
+        "version":"000100a1",
+        "sha256":"babd8e3a91b7c78e549090ad9b9c2b8bf5ab315ae9f96c92ff833715665bb678"
     }
 }
 ```
 
-codename代表了硬件类型；revision原则上应该是通过硬件检测出来的，目前没有多个硬件版本定义，revision缺省设置为`a0`。
+hardware属性描述硬件型号和版本；codename代表硬件类型，`roadhill`表示当前硬件的soundbar产品；revision原则上应该是通过硬件检测出来的，目前没有多硬件版本定义，revision缺省设置为`a0`。
+
+firmware属性描述固件；其中version暂无特殊约定；sha256是乐鑫固件的bin文件的最后32个字节的内容，其值为去掉这32个字节的前面部分的sha256。
+
+
 
 目前系统中还包含了c3模块，但c3模块的固件信息不放在`DeviceInfo`里定义了。
 
 
 
-### StateInfo
+### STATE_INFO
 
-gateway -> cloud
+待详细定义。
 
-（待定）
+STATE_INFO
 
 
 
-### PREPARE
 
-cloud->gateway
+
+### OTA
+
+云应该在收到网关的`DEVICE_INFO`命令之后通过其firmware信息判断网关固件是否需要升级，若需要升级应该立刻发送`OTA`命令。
+
+网关目前假定`OTA`只能是第一个收到的命令，收到`OTA`命令后网关立刻中断tcp连接开始`OTA`升级，不再初始化其它任何功能组件；无论`OTA`成功失败网关都会重启。
+
+这也意味着如果`OTA`命令中包含的固件无效或者下载有问题，网关会陷入循环的升级失败中，如果固件有文件完整性问题，反复升级重启会减少flash寿命。可能应该针对同一个固件做升级计数器；反复升级到一定次数后不再升级同一sha256值的固件。
+
+`OTA`命令包含一个固件下载的URL，无需提供其它信息；该命令直接使用乐鑫提供的https ota库实现，如果需要使用https，需要提供PEM格式的服务器证书。
 
 ```json
 {
-    "cmd": "prepare",
-    "firmware": {
-        "url": "http://xxx",
-        "size": 123456,
-        "version": "01000000",
+    "cmd":"OTA",
+    "url":"http://10.42.0.1/files/roadhill.bin"
+}
+```
+
+
+
+### SET_SESSION
+
+`SET_STAGE`命令设置了一个剧本的上下文，例子如下：
+
+```json
+{
+    "cmd": "SET_SESSION",
+    "version": "1.0",
+    "session_id": "some unique string",
+    "bulb_firmware": {
+        "url": "http://10.42.0.1/files/bulbcast.bin",
+        "sha256": "21e831461f432ca453a3b9b97e0870c2807946f559d2574c5d81a571f08755fe"
     },
-    "bulbs":[
-        ["7a0764e689fb", "7a0764e6a70a"],
+    "bulb_groups":[
+        ["7a0764e689fb"],
         [],
-        ["7a0764b68533"],
-        []
+        ["7a0764e6a70a", "7a0764e6a70a"],
+        ["7a0764b68533"]
+    ],
+    "tracks_url": "http://10.42.0.1/files/album1135",
+    "tracks": [
+        "57dc4ec6ddce686cce6460a04bb5cc31",
+        "43a5155e9d3772406fb51b9fb3c5e668"
     ]
 }
 ```
+
+#### version
+
+`version`指当前命令的JSON格式版本。因字段和设计假设较多，在出现breaking change时可以用`version`检查。
+
+#### session_id
+
+网关在汇报状态时，会提供当前的`session_id`，除此之外该属性无其它用途。网关不会关联`session_id`和文件cache，也不会持久化该属性，网关重启后云必须重新发送`SET_SESSION`命令。云可以用任何逻辑生成该字段，包括使用一次性随机uuid或类似web token方式加密一些信息。
+
+#### bulb_firmware
+
+所需的灯的固件信息，包括sha256（乐鑫固件格式）和下载固件的url。
+
+#### bulb_groups
+
+`bulb_groups`是一个array，每个element也是一个array。
+
+每个element里包含0到N个灯的蓝牙地址字符串。element的index是这些灯的index，zero-based，对应的bitmask是`uint16_t(1 << index)`。
+
+如果某个index没有element，可以使用`[]`占位。
+
+允许给多个灯分配同样的index，这意味着这些灯都有同样的bitmask。有同样的bitmask的灯总是执行同样的指令，但指令中可能存在随机性差异化的效果。
+
+例子中定义了3个组。`index=0`的组只有一个灯，对应的bitmask是`0x0001`；`index=1`的组没有灯；`index=2`的组包含两个灯，bitmask是`0x0004`；最后`index=3`的组只有一个灯，bitmask是`0x0008`。
+
+#### tracks_url & tracks
+
+下载mp3文件的url，和文件的md5值（hex格式）列表。其中md5值会在`PLAY`命令中继续使用，也会在网关向云报告session状态时使用。
+
+网关下载track文件时合成完整url的方式为：
+
+```js
+`${tracks_url}/${track_md5}.mp3`
+```
+
+云提供的`tracks_url`不应该有`/`结尾（但有也不是问题）。
+
+##### 设计说明
+
+`.mp3`扩展名在这里不是一个很好的设计约定。它主要的方便是可以直接使用http的静态文件服务，尤其是开发调试时。但如果使用对象存储或遵循restful设计习惯时不必有这个扩展名约定，使用http stream里的MIME type是更灵活的方式，未来也不一定一直使用mp3格式。
+
+##### 几种常用Digest比较
+
+| -      | digest size in bits | digest size in bytes | digest size in hex string | comment     |
+| ------ | ------------------- | -------------------- | ------------------------- | ----------- |
+| md5    | 128 bits            | 16 bytes             | 32 characters             |             |
+| sha1   | 160 bits            | 20 bytes             | 40 characters             | used in git |
+| sha256 | 256 bits            | 32 bytes             | 64 characters             |             |
+
+
 
 ### PLAY
 
@@ -100,28 +194,51 @@ cloud->gateway
 
 ```json
 {
-	"cmd": "play",
-	"audio": [
-        {
-            "url": "http://",
-            "digest": "jkljkljl",
-            "size": 123456
-        },
-        {
-            "url": "http://",
-            "digest": "jkljkljl",
-            "size": 127878            
-        }
+	"cmd": "PLAY",
+    "version": "1.0",
+	"track": "57dc4ec6ddce686cce6460a04bb5cc31",
+    "next_tracks": [
+        "43a5155e9d3772406fb51b9fb3c5e668",
+        "972f619d7f82864a3b11b0e7b37d993e"
     ],
-    "light": [
-        [10, "code"]
-    ]
+    "lighting": [
+        [10, "code"],
+        [100, "another code"],
+    ],
+    "lighting_time_unit": "sec",
+    "start": "immediate"
 }
 ```
 
-### STOP
+#### version
 
-cloud->gateway
+命令格式版本。
+
+#### track
+
+需要播放的音频文件，该track必须在当前session的tracks列表内，否则视为错误。
+
+#### next_tracks
+
+在当前播放之后，下面最可能播放的音频文件列表，主要目的是给即时下载播放时，提供一个下载的优先级；并不会在track指定的音频文件播放完成后自动播放后续文件。
+
+数组中的文件都必须在当前session的tracks列表内，否则忽略不存在的track。
+
+#### lighting
+
+lighting包含时间戳和灯码，但灯码没有仔细推敲模板化的可能，意味着目前仅支持hardcode的bulbcode，但不包含magic，seq num，group id，需具体看一下灯的命令编码格式确定这里有多少byte；可以确定的是字符串是hex格式。
+
+#### lighting_time_unit
+
+灯谱的时间单位，当前仅支持秒（`sec`）。
+
+#### start
+
+当前支持`immediate`（立即开始播放），和`no`（不播放）。设置为立即开始播放不要求track已经下载完成，网关会尽可能选择尽可能早开始的播放时间。
+
+
+
+### STOP
 
 ```json
 {
@@ -129,9 +246,11 @@ cloud->gateway
 }
 ```
 
-停止当前播放（但未定义是否停止下载）
+停止当前播放，但不意味着停止所有下载。
 
-### PING (optional)
+
+
+### PING (optional, not sure)
 
 cloud->gateway
 
@@ -143,7 +262,7 @@ cloud->gateway
 
 
 
-### QUIT
+### QUIT (not sure)
 
 ```json
 {
@@ -152,58 +271,6 @@ cloud->gateway
 ```
 
 会立刻停止播放和让所有的灯重启。
-
-
-
-## 实现
-
-和`bulbboot`一样，`roadboot`项目负责升级和启动`roadhill`固件，`roadhill`固件只负责下载播放功能。
-
-
-
-## roadboot
-
-本节内容无效，即将merge进roadhill，改用乐鑫官方的a/b升级方式。
-
-
-
-`roadboot`目前采用最小化设计，仅idf项目（即不包含音频功能），也不处理按键和C3模块，这些都是`roadhill`功能。
-
-
-
-`roadboot`仅工作在wifi sta模式下，启动后通过扫描，寻求连接ssid包含`roadhill_test`或`roadhill_prod`（本文档中最终连接的ssid名称和密码均使用`roadhill_prod`代替）的ap，如果发现则使用和token相同的字符串做密码去连接。
-
-
-
-连接成功后，使用`GET`访问预定义的http服务，通过query string提交设备的型号（`juwanke-gateway-speaker-01`），硬件版本号（`a1`），firmware版本（`01000000`），设备id（使用mac），获得返回的json。
-
-```json
-{
-    "url":"http url",
-    "size": 123456,
-    "sha256": "the last 32 bytes in hex code"
-}
-```
-
-
-
-如果成功获得该返回结果，`roadboot`比对当前的ota1固件的hash是否一致，如果不一致则下载指定固件安装，否则启动该固件。
-
-
-
-如果连接的是本地的服务，即`roadhill_test`的gateway，boot url使用：
-
-```
-GET http://<gateway ip>/gateway/boot?model=juwanke-gateway-speaker-01&rev=a1&fw=01000000&mac=1234567890ab
-```
-
-
-
-**TODO**
-
-- [ ] 应该有声音播放反馈；
-- [ ] 生产环境的HTTP的URL定义；
-- [ ] 应实际校验固件，因为有可能在刷入新固件过程中，未能擦除旧固件的hash，如果因为某种原因云决定回卷到旧固件，如果没有校验只是读取了hash后启动，则可能陷入死循环；
 
 
 
