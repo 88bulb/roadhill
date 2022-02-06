@@ -68,9 +68,9 @@ static const char rev_token[] = "**";
 static const char ver_token[] = "00000000";
 static const char sha_token[] = "0000000000000000";
 static const char device_info_tmpl[] =
-    "{\"hardware\":{\"codename\":\"roadhill\",\"revision\":\"**\"},"
-    "\"firmware\":{\"version\":\"00000000\",\"sha256\":\"0000000000000000000000"
-    "000000000000000000000000000000000000000000\"}}\n";
+    "{\"type\":\"DEVICE_INFO\",\"hardware\":{\"codename\":\"roadhill\","
+    "\"revision\":\"**\"},\"firmware\":{\"version\":\"00000000\",\"sha256\":"
+    "\"0000000000000000000000000000000000000000000000000000000000000000\"}}\n";
 
 typedef enum {
     CMD_UNDEFINED = 0,
