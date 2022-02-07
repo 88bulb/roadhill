@@ -29,13 +29,13 @@ static const char *TAG = "roadhill:main";
 
 const char hex_char[16] = "0123456789abcdef";
 
-typedef enum {
-    IP_ACQUIRED = 0,
-    OTA_REQUESTED,
-} bits_enum_t;
+#define EB_STA_GOT_IP ((EventBits_t)(1 << 0))
+#define EB_OTA_REQUESTED ((EventBits_t)(1 << 1))
+static EventGroupHandle_t event_bits;
 
-static EventGroupHandle_t bits;
+static QueueHandle_t http_ota_queue;
 static QueueHandle_t tcp_send_queue;
+static QueueHandle_t player_queue;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -80,20 +80,17 @@ typedef enum {
     CMD_SET_SESSION,
     CMD_PLAY,
     CMD_STOP,
-} command_enum_t;
+} command_type_t;
+
+#define OTA_URL_STRING_BUFFER_SIZE (1024)
 
 typedef struct {
-    char url[1024];
+    char url[OTA_URL_STRING_BUFFER_SIZE];
 } ota_command_data_t;
 
 typedef struct {
-    command_enum_t type;
-    union {
-        ota_command_data_t ota;
-    } data;
-} command_t;
 
-static command_t *command = NULL;
+} play_command_data_t;
 
 typedef enum { BULB_NOTFOUND = 0, BULB_INVITING, BULB_READY } bulb_state_t;
 
@@ -120,7 +117,6 @@ typedef struct {
 /**
  * mutex to protect session data
  */
-SemaphoreHandle_t session_mutex = NULL;
 session_data_t *session_data = NULL;
 
 static bool is_semver(const char *str) {
@@ -176,35 +172,45 @@ static void prepare_device_info() {
 }
 
 static int process_line() {
+    command_type_t cmd_type;
+    void* data = NULL;
+
     int err = 0;
     ESP_LOGI(TAG, "process line: %s", line);
     cJSON *root = cJSON_Parse(line);
     if (root) {
-        command->type = CMD_UNDEFINED;
-
         char *cmd = cJSON_GetObjectItem(root, "cmd")->valuestring;
         if (0 == strcmp(cmd, "OTA")) {
-            command->type = CMD_OTA;
-            command->data.ota.url[0] = '\0';
+            cmd_type = CMD_OTA;
             char *url = cJSON_GetObjectItem(root, "url")->valuestring;
-            if (url) {
-                strlcpy(command->data.ota.url, url,
-                        sizeof(command->data.ota.url));
-                ESP_LOGI(TAG, "ota url: %s", command->data.ota.url);
+            if (url && strlen(url) < OTA_URL_STRING_BUFFER_SIZE) {
+                data = malloc(sizeof(ota_command_data_t));
+                if (data) {
+                    strcpy(((ota_command_data_t*)data)->url, url);
+                    if (pdTRUE == xQueueSend(http_ota_queue, &data, 0)) {
+                        ESP_LOGI(TAG, "ota url: %s", url);
+                        // TODO is this the best way?
+                        vTaskDelay(portMAX_DELAY);
+                    } else {
+                        err = -1;
+                        ESP_LOGI(TAG, "failed to enqueue ota request");
+                    }
+                } else {
+                    err = -1;
+                    ESP_LOGI(TAG, "no memory");
+                }
             } else {
                 err = -1;
-                command->type = CMD_UNDEFINED;
                 ESP_LOGI(TAG, "invalid ota url");
             }
-        } else if (0 == strcmp(cmd, "SET_SESSION")) {
-
-            xSemaphoreTake(session_mutex, portMAX_DELAY);
-            xSemaphoreGive(session_mutex);
+        } else if (0 == strcmp(cmd, "PLAY")) {
         }
         cJSON_Delete(root);
     } else {
         err = -1; // invalid json
+        ESP_LOGI(TAG, "invalid json");
     }
+
     return err;
 }
 
@@ -230,43 +236,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == IP_EVENT) {
         switch (event_id) {
         case IP_EVENT_STA_GOT_IP:
-            xEventGroupSetBits(bits, (EventBits_t)1);
+            xEventGroupSetBits(event_bits, EB_STA_GOT_IP);
             break;
         case IP_EVENT_STA_LOST_IP:
-            xEventGroupClearBits(bits, (EventBits_t)1);
+            xEventGroupClearBits(event_bits, EB_STA_GOT_IP);
             break;
         default:
             break;
         }
     }
-}
-
-esp_err_t ota_http_event_handler(esp_http_client_event_t *evt) {
-    switch (evt->event_id) {
-    case HTTP_EVENT_ERROR:
-        ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
-        break;
-    case HTTP_EVENT_ON_CONNECTED:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
-        break;
-    case HTTP_EVENT_HEADER_SENT:
-        ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
-        break;
-    case HTTP_EVENT_ON_HEADER:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key,
-                 evt->header_value);
-        break;
-    case HTTP_EVENT_ON_DATA:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
-        break;
-    case HTTP_EVENT_ON_FINISH:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
-        break;
-    case HTTP_EVENT_DISCONNECTED:
-        ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
-        break;
-    }
-    return ESP_OK;
 }
 
 static void tcp_send(void *arg) {
@@ -283,7 +261,7 @@ static void tcp_receive(void *arg) {
 
     // (re-)connection in loop
     while (1) {
-        xEventGroupWaitBits(bits, (EventBits_t)1, pdFALSE, pdFALSE,
+        xEventGroupWaitBits(event_bits, EB_STA_GOT_IP, pdFALSE, pdFALSE,
                             portMAX_DELAY);
 
         esp_netif_ip_info_t ip_info;
@@ -343,11 +321,8 @@ static void tcp_receive(void *arg) {
                 if (rx_buf[i] == '\r' || rx_buf[i] == '\n') {
                     if (llen > 0) {
                         line[llen] = '\0';
-                        if (process_line() || command->type == CMD_UNDEFINED) {
-                            goto closing;
-                        }
-
-                        if (command->type == CMD_OTA) {
+                        // TODO
+                        if (process_line()) {
                             goto closing;
                         }
 
@@ -366,14 +341,60 @@ static void tcp_receive(void *arg) {
     closing:
         // shutdown(sock, 0);
         close(sock);
+        llen = 0;
     closed:
-        if (command->type == CMD_OTA) {
-            xEventGroupSetBits(bits, (EventBits_t)2);
-            vTaskDelay(portMAX_DELAY);
-        } else {
-            vTaskDelay(8000 / portTICK_PERIOD_MS);
-        }
+        vTaskDelay(8000 / portTICK_PERIOD_MS);
     }
+}
+
+esp_err_t ota_http_event_handler(esp_http_client_event_t *evt) {
+    switch (evt->event_id) {
+    case HTTP_EVENT_ERROR:
+        ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+        break;
+    case HTTP_EVENT_ON_CONNECTED:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+        break;
+    case HTTP_EVENT_HEADER_SENT:
+        ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+        break;
+    case HTTP_EVENT_ON_HEADER:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key,
+                 evt->header_value);
+        break;
+    case HTTP_EVENT_ON_DATA:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+        break;
+    case HTTP_EVENT_ON_FINISH:
+        ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+        break;
+    case HTTP_EVENT_DISCONNECTED:
+        ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
+        break;
+    }
+    return ESP_OK;
+}
+
+static void http_ota(void *arg) {
+    ota_command_data_t *cmd;
+    xQueueReceive(http_ota_queue, &cmd, portMAX_DELAY);
+
+    esp_http_client_config_t config = {
+        .url = cmd->url,
+        //        .cert_pem = (char *)server_cert_pem_start,
+        .event_handler = ota_http_event_handler,
+        .keep_alive_enable = true,
+    };
+
+    esp_err_t err = esp_https_ota(&config);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "ota succeeded");
+    } else {
+        ESP_LOGI(TAG, "ota failed, %s", esp_err_to_name(err));
+    }
+
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    esp_restart();
 }
 
 void app_main(void) {
@@ -384,9 +405,12 @@ void app_main(void) {
 
     line = (char *)malloc(LINE_LENGTH);
     memset(line, 0, LINE_LENGTH);
-    command = (command_t *)malloc(sizeof(command_t));
 
-    bits = xEventGroupCreate();
+    event_bits = xEventGroupCreate();
+
+    http_ota_queue = xQueueCreate(1, sizeof(void *));
+    xTaskCreate(http_ota, "http_ota", 65536, NULL, 11, NULL);
+
     tcp_send_queue = xQueueCreate(20, sizeof(void *));
     xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
     xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 10, NULL);
@@ -518,21 +542,5 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // OTA CMD
-    xEventGroupWaitBits(bits, (EventBits_t)2, pdFALSE, pdFALSE, portMAX_DELAY);
-
-    esp_http_client_config_t config = {
-        .url = command->data.ota.url,
-        //        .cert_pem = (char *)server_cert_pem_start,
-        .event_handler = ota_http_event_handler,
-        .keep_alive_enable = true,
-    };
-
-    err = esp_https_ota(&config);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "ota succeeded");
-    } else {
-        ESP_LOGI(TAG, "ota failed, %s", esp_err_to_name(err));
-    }
-    esp_restart();
+    vTaskDelay(portMAX_DELAY);
 }

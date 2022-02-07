@@ -13,5 +13,6 @@ elseif has('python3')
 "  imap <C-I> <c-o>:py3f /usr/share/clang/clang-format-10/clang-format.py<cr>
 endif
 
-" for js files, 2 spaces
-autocmd Filetype javascript setlocal ts=2 sw=2
+let g:ale_lint_on_save = 1
+let g:ale_fix_on_save = 1
+
