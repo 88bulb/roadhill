@@ -14,6 +14,7 @@
 #include "esp_wifi.h"
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
+#include "esp_rom_md5.h"
 #include "nvs_flash.h"
 
 #include "esp_netif.h"
@@ -34,6 +35,7 @@ typedef enum {
 } bits_enum_t;
 
 static EventGroupHandle_t bits;
+static QueueHandle_t tcp_send_queue;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -75,7 +77,7 @@ static const char device_info_tmpl[] =
 typedef enum {
     CMD_UNDEFINED = 0,
     CMD_OTA,
-    CMD_PREPARE,
+    CMD_SET_SESSION,
     CMD_PLAY,
     CMD_STOP,
 } command_enum_t;
@@ -92,6 +94,34 @@ typedef struct {
 } command_t;
 
 static command_t *command = NULL;
+
+typedef enum { BULB_NOTFOUND = 0, BULB_INVITING, BULB_READY } bulb_state_t;
+
+typedef struct {
+    uint8_t addr;
+    uint16_t bitmask;
+} bulb_t;
+
+typedef struct {
+    uint8_t md5[16];
+    char hex[40];
+} track_digest_t;
+
+typedef struct {
+    int number;
+    char session_id[4096];
+    char bulb_firmware_url[1024];
+    char bulb_firmware_sha256[80];
+    bulb_t bulbs[64];
+    char tracks_url[1024];
+    track_digest_t tracks[256];
+} session_data_t;
+
+/**
+ * mutex to protect session data
+ */
+SemaphoreHandle_t session_mutex = NULL;
+session_data_t *session_data = NULL;
 
 static bool is_semver(const char *str) {
     if (strlen(str) != 8)
@@ -153,7 +183,7 @@ static int process_line() {
         command->type = CMD_UNDEFINED;
 
         char *cmd = cJSON_GetObjectItem(root, "cmd")->valuestring;
-        if (0 == strcmp(cmd, "ota")) {
+        if (0 == strcmp(cmd, "OTA")) {
             command->type = CMD_OTA;
             command->data.ota.url[0] = '\0';
             char *url = cJSON_GetObjectItem(root, "url")->valuestring;
@@ -166,6 +196,10 @@ static int process_line() {
                 command->type = CMD_UNDEFINED;
                 ESP_LOGI(TAG, "invalid ota url");
             }
+        } else if (0 == strcmp(cmd, "SET_SESSION")) {
+
+            xSemaphoreTake(session_mutex, portMAX_DELAY);
+            xSemaphoreGive(session_mutex);
         }
         cJSON_Delete(root);
     } else {
@@ -235,7 +269,16 @@ esp_err_t ota_http_event_handler(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
-static void tcp_connection(void *arg) {
+static void tcp_send(void *arg) {
+    void *handle = NULL;
+
+    while (xQueueReceive(tcp_send_queue, &handle, portMAX_DELAY)) {
+        free(handle);
+        handle = NULL;
+    }
+}
+
+static void tcp_receive(void *arg) {
     esp_err_t err;
 
     // (re-)connection in loop
@@ -321,6 +364,7 @@ static void tcp_connection(void *arg) {
         }
 
     closing:
+        // shutdown(sock, 0);
         close(sock);
     closed:
         if (command->type == CMD_OTA) {
@@ -338,12 +382,14 @@ void app_main(void) {
     esp_err_t err;
     int i, j;
 
-    bits = xEventGroupCreate();
-
     line = (char *)malloc(LINE_LENGTH);
     memset(line, 0, LINE_LENGTH);
-
     command = (command_t *)malloc(sizeof(command_t));
+
+    bits = xEventGroupCreate();
+    tcp_send_queue = xQueueCreate(20, sizeof(void *));
+    xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
+    xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 10, NULL);
 
     // init nvs
     err = nvs_flash_init();
@@ -472,14 +518,12 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    xTaskCreate(tcp_connection, "tcp_connection", 4096, NULL, 10, NULL);
-
     // OTA CMD
     xEventGroupWaitBits(bits, (EventBits_t)2, pdFALSE, pdFALSE, portMAX_DELAY);
 
     esp_http_client_config_t config = {
         .url = command->data.ota.url,
-//        .cert_pem = (char *)server_cert_pem_start,
+        //        .cert_pem = (char *)server_cert_pem_start,
         .event_handler = ota_http_event_handler,
         .keep_alive_enable = true,
     };
