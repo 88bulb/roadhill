@@ -13,7 +13,9 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
     console.log(`roadhill.bin sha256: ${sha256}`)
 
     const tcp = net.createServer(socket => {
-      console.log(`client connected, local: ${socket.localAddress}, remote: ${socket.remoteAddress}`)
+      console.log('client connected,' +
+                  `local: ${socket.localAddress}, ` +
+                  `remote: ${socket.remoteAddress}`)
 
       socket.on('data', data => {
         const text = data.toString()
@@ -24,7 +26,23 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
 
           if (msg.type === 'DEVICE_INFO') {
             if (msg.firmware.sha256 !== sha256) {
-              const outgoing = JSON.stringify({ cmd: 'OTA', url: 'http://10.42.0.1/files/roadhill.bin' }) + '\n'
+              const outgoing = JSON.stringify({
+                cmd: 'OTA',
+                url: 'http://10.42.0.1/files/roadhill.bin'
+              }) + '\n'
+              console.log(`outgoing -> ${outgoing}`)
+              socket.write(outgoing)
+            } else {
+              const outgoing = JSON.stringify({
+                cmd: 'PLAY',
+                version: '1.0',
+                tracks_url: 'http://10.42.0.1/files/album000001',
+                current_track: '8b76c5faf3fd66b66d5a36e6ffe9e7bb.mp3',
+                next_tracks: [],
+                lighting: [],
+                lighting_time_unit: 'sec',
+                start: 'immediate'
+              }) + '\n'
               console.log(`outgoing -> ${outgoing}`)
               socket.write(outgoing)
             }
@@ -36,12 +54,14 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
     })
 
     tcp.listen(8080, '10.42.0.1', () => {
-      console.log('tcp server started, listening 10.42.0.1 @ 8080')
+      console.log('tcp server started, ' +
+                  'listening 10.42.0.1 @ 8080')
     })
 
     app.use('/files', express.static('files'))
     app.listen(80, '10.42.0.1', () => {
-      console.log('http server started, listening 10.42.0.1 @ 80, files located in /files')
+      console.log('http server started, ' +
+                  'listening 10.42.0.1 @ 80, files located in /files')
     })
   })
 })
