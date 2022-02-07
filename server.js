@@ -24,7 +24,7 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
 
           if (msg.type === 'DEVICE_INFO') {
             if (msg.firmware.sha256 !== sha256) {
-              const outgoing = JSON.stringify({ cmd: 'ota', url: 'http://10.42.0.1/files/roadhill.bin' }) + '\n'
+              const outgoing = JSON.stringify({ cmd: 'OTA', url: 'http://10.42.0.1/files/roadhill.bin' }) + '\n'
               console.log(`outgoing -> ${outgoing}`)
               socket.write(outgoing)
             }
