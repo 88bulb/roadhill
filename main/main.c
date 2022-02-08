@@ -11,19 +11,32 @@
 #include "cJSON.h"
 
 #include "esp_log.h"
+
+#include "driver/sdmmc_defs.h"
+#include "driver/sdmmc_host.h"
+
 #include "esp_wifi.h"
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
 #include "esp_rom_md5.h"
+#include "esp_vfs_fat.h"
 #include "nvs_flash.h"
 
 #include "esp_netif.h"
 
+
 #include "esp_peripherals.h"
+
+#define MOUNT_POINT "/emmc"
 
 // #include "periph_wifi.h"
 
 #define TCP_PORT (6015)
+
+extern esp_err_t esp_vfs_exfat_sdmmc_mount(
+    const char *base_path, const sdmmc_host_t *host_config,
+    const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
+    sdmmc_card_t **out_card);
 
 static const char *TAG = "roadhill:main";
 
@@ -129,37 +142,6 @@ static bool is_semver(const char *str) {
     return true;
 }
 
-static void prepare_device_info() {
-    char *str;
-    strcpy(tx_buf, device_info_tmpl);
-
-    str = strstr(tx_buf, rev_token);
-    str[0] = 'a';
-    str[1] = '0';
-
-    const esp_app_desc_t *app_desc = esp_ota_get_app_description();
-    if (is_semver(app_desc->version)) {
-        str = strstr(tx_buf, ver_token);
-        for (int i = 0; i < 8; i++) {
-            *str++ = app_desc->version[i];
-        }
-    }
-
-    uint8_t sha[32];
-    const esp_partition_t *part = esp_ota_get_running_partition();
-    if (part) {
-        esp_err_t err = esp_partition_get_sha256(part, sha);
-        if (err == ESP_OK) {
-            str = strstr(tx_buf, sha_token);
-            for (int i = 0; i < 32; i++) {
-                str[2 * i] = hex_char[sha[i] / 16];
-                str[2 * i + 1] = hex_char[sha[i] % 16];
-            }
-        }
-    }
-    tx_len = strlen(tx_buf);
-}
-
 bool is_valid_track_name(char *name) {
     if (strlen(name) != 36)
         return false;
@@ -202,6 +184,38 @@ track_digest_t track_name_to_digest(char *name) {
     }
     return digest;
 }
+
+static void prepare_device_info() {
+    char *str;
+    strcpy(tx_buf, device_info_tmpl);
+
+    str = strstr(tx_buf, rev_token);
+    str[0] = 'a';
+    str[1] = '0';
+
+    const esp_app_desc_t *app_desc = esp_ota_get_app_description();
+    if (is_semver(app_desc->version)) {
+        str = strstr(tx_buf, ver_token);
+        for (int i = 0; i < 8; i++) {
+            *str++ = app_desc->version[i];
+        }
+    }
+
+    uint8_t sha[32];
+    const esp_partition_t *part = esp_ota_get_running_partition();
+    if (part) {
+        esp_err_t err = esp_partition_get_sha256(part, sha);
+        if (err == ESP_OK) {
+            str = strstr(tx_buf, sha_token);
+            for (int i = 0; i < 32; i++) {
+                str[2 * i] = hex_char[sha[i] / 16];
+                str[2 * i + 1] = hex_char[sha[i] % 16];
+            }
+        }
+    }
+    tx_len = strlen(tx_buf);
+}
+
 
 static int process_line() {
     command_type_t cmd_type;
@@ -505,6 +519,45 @@ static void juggle_jobs(void *arg) {
     }
 }
 
+static void sdmmc_card_info(const sdmmc_card_t *card) {
+    bool print_scr = true;
+    bool print_csd = true;
+    const char *type;
+    ESP_LOGI(TAG, "sdmmc name: %s", card->cid.name);
+    if (card->is_sdio) {
+        type = "SDIO";
+        print_scr = true;
+        print_csd = true;
+    } else if (card->is_mmc) {
+        type = "MMC";
+        print_csd = true;
+    } else {
+        type = (card->ocr & SD_OCR_SDHC_CAP) ? "SDHC/SDXC" : "SDSC";
+    }
+    ESP_LOGI(TAG, "sdmmc type: %s", type);
+    if (card->max_freq_khz < 1000) {
+        ESP_LOGI(TAG, "sdmmc speed: %d kHz", card->max_freq_khz);
+    } else {
+        ESP_LOGI(TAG, "sdmmc speed: %d MHz%s", card->max_freq_khz / 1000,
+                 card->is_ddr ? ", DDR" : "");
+    }
+    ESP_LOGI(TAG, "sdmmc size: %lluMB",
+             ((uint64_t)card->csd.capacity) * card->csd.sector_size /
+                 (1024 * 1024));
+
+    if (print_csd) {
+        ESP_LOGI(
+            TAG,
+            "sdmmc csd: ver=%d, sector_size=%d, capacity=%d read_bl_len=%d",
+            card->csd.csd_ver, card->csd.sector_size, card->csd.capacity,
+            card->csd.read_block_len);
+    }
+    if (print_scr) {
+        ESP_LOGI(TAG, "sdmmc scr: sd_spec=%d, bus_width=%d", card->scr.sd_spec,
+                 card->scr.bus_width);
+    }
+}
+
 void app_main(void) {
     // esp_err_t is typedef-ed int, so it could be used with lwip/sockets
     // api, but the value should be interpretted differently.
@@ -534,6 +587,49 @@ void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = true,
+        .max_files = 16,
+        .allocation_unit_size = 16 * 1024
+    };
+
+    sdmmc_card_t *card;
+    const char mount_point[] = MOUNT_POINT;
+    ESP_LOGI(TAG, "intializing SD card");
+
+    // Use settings defined above to initialize SD card and mount FAT
+    // filesystem. Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience
+    // functions. Please check its source code and implement error recovery when
+    // developing production applications.
+    ESP_LOGI(TAG, "Using SDMMC peripheral");
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+
+    // This initializes the slot without card detect (CD) and write protect (WP)
+    // signals. Modify slot_config.gpio_cd and slot_config.gpio_wp if your board
+    // has these signals.
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+    // To use 1-line SD mode, change this to 1:
+    slot_config.width = 4;
+
+    // Enable internal pullups on enabled pins. The internal pullups
+    // are insufficient however, please make sure 10k external pullups are
+    // connected on the bus. This is for debug / example purpose only.
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    ESP_LOGI(TAG, "mounting exfat on sdmmc");
+    err = esp_vfs_exfat_sdmmc_mount(mount_point, &host, &slot_config,
+                                    &mount_config, &card);
+    if (err == ESP_OK) {
+        sdmmc_card_info(card);
+    } else {
+        ESP_LOGE(TAG,
+                 "Failed to initialize the card (%s). "
+                 "Make sure SD card lines have pull-up resistors in place.",
+                 esp_err_to_name(err));
+    } 
 
     // init event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());
