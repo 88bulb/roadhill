@@ -35,7 +35,7 @@ static EventGroupHandle_t event_bits;
 
 static QueueHandle_t http_ota_queue;
 static QueueHandle_t tcp_send_queue;
-static QueueHandle_t player_queue;
+static QueueHandle_t juggle_jobs_queue;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -83,13 +83,22 @@ typedef enum {
 } command_type_t;
 
 #define OTA_URL_STRING_BUFFER_SIZE (1024)
-
 typedef struct {
     char url[OTA_URL_STRING_BUFFER_SIZE];
 } ota_command_data_t;
 
 typedef struct {
+    uint8_t bytes[16];
+} track_digest_t;
 
+#define URL_BUFFER_SIZE (1024)
+#define TRACK_NAME_LENGTH (32)
+#define FILENAME_BUFFER_SIZE (40)
+typedef struct {
+    char tracks_url[URL_BUFFER_SIZE];
+    track_digest_t current_track;
+    int next_tracks_num;
+    char next_tracks[16][FILENAME_BUFFER_SIZE];
 } play_command_data_t;
 
 typedef enum { BULB_NOTFOUND = 0, BULB_INVITING, BULB_READY } bulb_state_t;
@@ -98,26 +107,6 @@ typedef struct {
     uint8_t addr;
     uint16_t bitmask;
 } bulb_t;
-
-typedef struct {
-    uint8_t md5[16];
-    char hex[40];
-} track_digest_t;
-
-typedef struct {
-    int number;
-    char session_id[4096];
-    char bulb_firmware_url[1024];
-    char bulb_firmware_sha256[80];
-    bulb_t bulbs[64];
-    char tracks_url[1024];
-    track_digest_t tracks[256];
-} session_data_t;
-
-/**
- * mutex to protect session data
- */
-session_data_t *session_data = NULL;
 
 static bool is_semver(const char *str) {
     if (strlen(str) != 8)
@@ -171,46 +160,156 @@ static void prepare_device_info() {
     tx_len = strlen(tx_buf);
 }
 
+bool is_valid_track_name(char *name) {
+    if (strlen(name) != 36)
+        return false;
+    if (0 != strcmp(&name[32], ".mp3"))
+        return false;
+    for (int i = 0; i < 32; i++) {
+        if (name[i] >= '0' && name[i] <= '9')
+            continue;
+        if (name[i] >= 'a' && name[i] <= 'f')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+/**
+ * name must be a 32-character hex string [0-9a-f], there is no check inside the
+ * function.
+ */
+track_digest_t track_name_to_digest(char *name) {
+    track_digest_t digest;
+    for (int i = 0; i < 16; i++) {
+        uint8_t u8;
+        char high = name[2 * i];
+        char low = name[2 * i + 1];
+
+        if (high >= 'a' && high <= 'f') {
+            u8 = (high - 'a') << 4;
+        } else {
+            u8 = (high - '0') << 4;
+        }
+
+        if (low >= 'a' && low <= 'f') {
+            u8 += low - 'a';
+        } else {
+            u8 += low - '0';
+        }
+
+        digest.bytes[i] = u8;
+    }
+    return digest;
+}
+
 static int process_line() {
     command_type_t cmd_type;
-    void* data = NULL;
-
+    void *data = NULL;
     int err = 0;
+
     ESP_LOGI(TAG, "process line: %s", line);
     cJSON *root = cJSON_Parse(line);
-    if (root) {
-        char *cmd = cJSON_GetObjectItem(root, "cmd")->valuestring;
-        if (0 == strcmp(cmd, "OTA")) {
-            cmd_type = CMD_OTA;
-            char *url = cJSON_GetObjectItem(root, "url")->valuestring;
-            if (url && strlen(url) < OTA_URL_STRING_BUFFER_SIZE) {
-                data = malloc(sizeof(ota_command_data_t));
-                if (data) {
-                    strcpy(((ota_command_data_t*)data)->url, url);
-                    if (pdTRUE == xQueueSend(http_ota_queue, &data, 0)) {
-                        ESP_LOGI(TAG, "ota url: %s", url);
-                        // TODO is this the best way?
-                        vTaskDelay(portMAX_DELAY);
-                    } else {
-                        err = -1;
-                        ESP_LOGI(TAG, "failed to enqueue ota request");
-                    }
-                } else {
-                    err = -1;
-                    ESP_LOGI(TAG, "no memory");
-                }
-            } else {
-                err = -1;
-                ESP_LOGI(TAG, "invalid ota url");
-            }
-        } else if (0 == strcmp(cmd, "PLAY")) {
-        }
-        cJSON_Delete(root);
-    } else {
-        err = -1; // invalid json
-        ESP_LOGI(TAG, "invalid json");
+    if (root == NULL) {
+        ESP_LOGI(TAG, "failed to parse json");
+        err = -1;
+        goto finish;
     }
 
+    char *cmd = cJSON_GetObjectItem(root, "cmd")->valuestring;
+    if (cmd == NULL) {
+        ESP_LOGI(TAG, "no cmd property");
+        err = -1;
+        goto finish;
+    }
+
+    if (0 == strcmp(cmd, "OTA")) {
+        cmd_type = CMD_OTA;
+        data = malloc(sizeof(ota_command_data_t));
+        if (data == NULL) {
+            err = -1;
+            ESP_LOGI(TAG, "no memory");
+            goto finish;
+        }
+
+        ota_command_data_t *p = (ota_command_data_t *)data;
+
+        char *url = cJSON_GetObjectItem(root, "url")->valuestring;
+        if (url == NULL) {
+            ESP_LOGI(TAG, "ota command without url property");
+            err = -1;
+            goto finish;
+        }
+
+        if (!(strlen(url) < OTA_URL_STRING_BUFFER_SIZE)) {
+            ESP_LOGI(TAG, "ota command url too long");
+            err = -1;
+            goto finish;
+        }
+        strcpy(p->url, url);
+
+        if (pdTRUE != xQueueSend(http_ota_queue, &p, 0)) {
+            err = -1;
+            ESP_LOGI(TAG, "failed to enqueue ota request");
+            goto finish;
+        }
+
+        data = NULL;
+        ESP_LOGI(TAG, "ota request queued, url: %s", url);
+    } else if (0 == strcmp(cmd, "PLAY")) {
+        cmd_type = CMD_PLAY;
+        data = malloc(sizeof(play_command_data_t));
+        if (data == NULL) {
+            err = -1;
+            ESP_LOGI(TAG, "no memory");
+            goto finish;
+        }
+
+        play_command_data_t *p = (play_command_data_t *)data;
+
+        char *tracks_url = cJSON_GetObjectItem(root, "tracks_url")->valuestring;
+        if (tracks_url == NULL) {
+            err = -1;
+            ESP_LOGI(TAG, "play command has no tracks_url");
+            goto finish;
+        }
+        if (!(strlen(tracks_url) + TRACK_NAME_LENGTH < URL_BUFFER_SIZE)) {
+            err = -1;
+            ESP_LOGI(TAG, "play command tracks_url too long");
+            goto finish;
+        }
+        strcpy(p->tracks_url, tracks_url);
+
+        char *current_track =
+            cJSON_GetObjectItem(root, "current_track")->valuestring;
+        if (current_track == NULL) {
+            err = -1;
+            ESP_LOGI(TAG, "play command has no current_track");
+            goto finish;
+        }
+        if (!is_valid_track_name(current_track)) {
+            err = -1;
+            ESP_LOGI(TAG, "play command current_track invalid");
+            goto finish;
+        }
+        p->current_track = track_name_to_digest(current_track);
+
+        if (pdTRUE != xQueueSend(juggle_jobs_queue, &p, 0)) {
+            err = -1;
+            ESP_LOGI(TAG, "failed to enqueue play request");
+            goto finish;
+        }
+
+        data = NULL;
+        ESP_LOGI(TAG, "play request enqueued");
+    }
+
+finish:
+    if (data)
+        free(data);
+    if (root)
+        cJSON_Delete(root);
+    llen = 0;
     return err;
 }
 
@@ -397,6 +496,15 @@ static void http_ota(void *arg) {
     esp_restart();
 }
 
+static void fetch_track(void *arg) {}
+
+static void juggle_jobs(void *arg) {
+    play_command_data_t *cmd;
+    while (xQueueReceive(juggle_jobs_queue, &cmd, portMAX_DELAY)) {
+        ESP_LOGI(TAG, "play request received");
+    }
+}
+
 void app_main(void) {
     // esp_err_t is typedef-ed int, so it could be used with lwip/sockets
     // api, but the value should be interpretted differently.
@@ -411,9 +519,12 @@ void app_main(void) {
     http_ota_queue = xQueueCreate(1, sizeof(void *));
     xTaskCreate(http_ota, "http_ota", 65536, NULL, 11, NULL);
 
+    juggle_jobs_queue = xQueueCreate(2, sizeof(void *));
+    xTaskCreate(juggle_jobs, "juggle_jobs", 65536, NULL, 11, NULL);
+
     tcp_send_queue = xQueueCreate(20, sizeof(void *));
     xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
-    xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 10, NULL);
+    xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
 
     // init nvs
     err = nvs_flash_init();
