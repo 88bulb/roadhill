@@ -161,40 +161,40 @@ mount_to_vfs_fat(const esp_vfs_fat_mount_config_t *mount_config,
                 ESP_LOGD(TAG, "f_mount failed after formatting (%d)", res);
                 goto fail;
             }
-        } else {
-            /**
-            TODO
-                        FRESULT fr;
-                        FILINFO fno;
-                        fr = f_stat("initialized", &fno);
-                        switch (fr) {
-                        case FR_OK:
-                            ESP_LOGI(TAG, "file system properly initialized.");
-                            break;
-                        case FR_NO_FILE: {
-                            ESP_LOGI(TAG, "file system not properly
-            initialized."); res = f_unmount(drv); if (res != FR_OK) { err =
-            ESP_FAIL; ESP_LOGD(TAG, "f_unmount failed (%d)", res); goto fail;
-                            }
+        } /* else {
+            FRESULT fr;
+            FILINFO fno;
+            fr = f_stat("initialized", &fno);
+            switch (fr) {
+            case FR_OK:
+                ESP_LOGI(TAG, "file system properly initialized.");
+                break;
+            case FR_NO_FILE: {
+                ESP_LOGI(TAG, "file system not properly initialized.");
+                res = f_unmount(drv);
+                if (res != FR_OK) {
+                    err = ESP_FAIL;
+                    ESP_LOGD(TAG, "f_unmount failed (%d)", res);
+                    goto fail;
+                }
 
-                            err = partition_card(mount_config, drv, card, pdrv);
-                            if (err != ESP_OK) {
-                                goto fail;
-                            }
+                err = partition_card(mount_config, drv, card, pdrv);
+                if (err != ESP_OK) {
+                    goto fail;
+                }
 
-                            ESP_LOGW(TAG, "mounting again");
-                            res = f_mount(fs, drv, 0);
-                            if (res != FR_OK) {
-                                err = ESP_FAIL;
-                                ESP_LOGD(TAG, "f_mount failed after formatting
-            (%d)", res); goto fail;
-                            }
-                        } break;
-                        default:
-                            break;
-                        }
-            */
-        }
+                ESP_LOGW(TAG, "mounting again");
+                res = f_mount(fs, drv, 0);
+                if (res != FR_OK) {
+                    err = ESP_FAIL;
+                    ESP_LOGD(TAG, "f_mount failed after formatting (%d)", res);
+                    goto fail;
+                }
+            } break;
+            default:
+                break;
+            }
+        } */
     }
     return ESP_OK;
 

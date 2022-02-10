@@ -4,6 +4,8 @@ build/
 files/
 node_modules/
 sdkconfig.old
+test.c
 
 main/default.c
+
 

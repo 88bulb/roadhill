@@ -5,7 +5,6 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 
-// #include "lwip/err.h"
 #include "lwip/sockets.h"
 
 #include "cJSON.h"
@@ -24,12 +23,12 @@
 
 #include "esp_netif.h"
 
-
 #include "esp_peripherals.h"
 
 #define MOUNT_POINT "/emmc"
+#define CHUNK_DIR(x)   "/emmc/00/" x
 
-// #include "periph_wifi.h"
+#include "roadhill.h"
 
 #define TCP_PORT (6015)
 
@@ -38,7 +37,26 @@ extern esp_err_t esp_vfs_exfat_sdmmc_mount(
     const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
     sdmmc_card_t **out_card);
 
-static const char *TAG = "roadhill:main";
+static const char *TAG = "roadhill";
+
+static const char *const chunk_files[] = {
+    CHUNK_DIR("0000"), CHUNK_DIR("0001"), CHUNK_DIR("0002"), CHUNK_DIR("0003"),
+    CHUNK_DIR("0004"), CHUNK_DIR("0005"), CHUNK_DIR("0006"), CHUNK_DIR("0007"),
+    CHUNK_DIR("0008"), CHUNK_DIR("0009"), CHUNK_DIR("0010"), CHUNK_DIR("0011"),
+    CHUNK_DIR("0012"), CHUNK_DIR("0013"), CHUNK_DIR("0014"), CHUNK_DIR("0015"),
+    CHUNK_DIR("0016"), CHUNK_DIR("0017"), CHUNK_DIR("0018"), CHUNK_DIR("0019"),
+    CHUNK_DIR("0020"), CHUNK_DIR("0021"), CHUNK_DIR("0022"), CHUNK_DIR("0023"),
+    CHUNK_DIR("0024"), CHUNK_DIR("0025"), CHUNK_DIR("0026"), CHUNK_DIR("0027"),
+    CHUNK_DIR("0028"), CHUNK_DIR("0029"), CHUNK_DIR("0030"), CHUNK_DIR("0031"),
+    CHUNK_DIR("0032"), CHUNK_DIR("0033"), CHUNK_DIR("0034"), CHUNK_DIR("0035"),
+    CHUNK_DIR("0036"), CHUNK_DIR("0037"), CHUNK_DIR("0038"), CHUNK_DIR("0039"),
+    CHUNK_DIR("0040"), CHUNK_DIR("0041"), CHUNK_DIR("0042"), CHUNK_DIR("0043"),
+    CHUNK_DIR("0044"), CHUNK_DIR("0045"), CHUNK_DIR("0046"), CHUNK_DIR("0047"),
+    CHUNK_DIR("0048"), CHUNK_DIR("0049"), CHUNK_DIR("0050"), CHUNK_DIR("0051"),
+    CHUNK_DIR("0052"), CHUNK_DIR("0053"), CHUNK_DIR("0054"), CHUNK_DIR("0055"),
+    CHUNK_DIR("0056"), CHUNK_DIR("0057"), CHUNK_DIR("0058"), CHUNK_DIR("0059"),
+    CHUNK_DIR("0060"), CHUNK_DIR("0061"), CHUNK_DIR("0062"), CHUNK_DIR("0063"),
+};
 
 const char hex_char[16] = "0123456789abcdef";
 
@@ -48,7 +66,7 @@ static EventGroupHandle_t event_bits;
 
 static QueueHandle_t http_ota_queue;
 static QueueHandle_t tcp_send_queue;
-static QueueHandle_t juggle_jobs_queue;
+static QueueHandle_t juggler_queue;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -95,31 +113,9 @@ typedef enum {
     CMD_STOP,
 } command_type_t;
 
-#define OTA_URL_STRING_BUFFER_SIZE (1024)
-typedef struct {
-    char url[OTA_URL_STRING_BUFFER_SIZE];
-} ota_command_data_t;
-
-typedef struct {
-    uint8_t bytes[16];
-} track_digest_t;
-
-#define URL_BUFFER_SIZE (1024)
-#define TRACK_NAME_LENGTH (32)
-#define FILENAME_BUFFER_SIZE (40)
-typedef struct {
-    char tracks_url[URL_BUFFER_SIZE];
-    track_digest_t current_track;
-    int next_tracks_num;
-    char next_tracks[16][FILENAME_BUFFER_SIZE];
-} play_command_data_t;
+static ota_command_data_t *ota_command_data;
 
 typedef enum { BULB_NOTFOUND = 0, BULB_INVITING, BULB_READY } bulb_state_t;
-
-typedef struct {
-    uint8_t addr;
-    uint16_t bitmask;
-} bulb_t;
 
 static bool is_semver(const char *str) {
     if (strlen(str) != 8)
@@ -161,28 +157,46 @@ bool is_valid_track_name(char *name) {
  * name must be a 32-character hex string [0-9a-f], there is no check inside the
  * function.
  */
-track_digest_t track_name_to_digest(char *name) {
-    track_digest_t digest;
+md5_digest_t track_name_to_digest(char *name) {
+
+    md5_digest_t digest;
     for (int i = 0; i < 16; i++) {
         uint8_t u8;
         char high = name[2 * i];
         char low = name[2 * i + 1];
-
+    
         if (high >= 'a' && high <= 'f') {
-            u8 = (high - 'a') << 4;
+            u8 = (high - 'a' + 10) << 4;
         } else {
             u8 = (high - '0') << 4;
         }
 
         if (low >= 'a' && low <= 'f') {
-            u8 += low - 'a';
+            u8 += low - 'a' + 10;
         } else {
             u8 += low - '0';
         }
 
         digest.bytes[i] = u8;
+
     }
     return digest;
+}
+
+void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
+    char str[40] = {0};
+
+    for (int i = 0; i < 16; i++) {
+        str[2 * i] = hex_char[digest.bytes[i] / 16];
+        str[2 * i + 1] = hex_char[digest.bytes[i] % 16];
+    }
+    str[32] = '.';
+    str[33] = 'm';
+    str[34] = 'p';
+    str[35] = '3';
+    str[36] = '\0';
+    strlcat(tracks_url, "/", size);
+    strlcat(tracks_url, str, size);
 }
 
 static void prepare_device_info() {
@@ -216,7 +230,6 @@ static void prepare_device_info() {
     tx_len = strlen(tx_buf);
 }
 
-
 static int process_line() {
     command_type_t cmd_type;
     void *data = NULL;
@@ -239,14 +252,6 @@ static int process_line() {
 
     if (0 == strcmp(cmd, "OTA")) {
         cmd_type = CMD_OTA;
-        data = malloc(sizeof(ota_command_data_t));
-        if (data == NULL) {
-            err = -1;
-            ESP_LOGI(TAG, "no memory");
-            goto finish;
-        }
-
-        ota_command_data_t *p = (ota_command_data_t *)data;
 
         char *url = cJSON_GetObjectItem(root, "url")->valuestring;
         if (url == NULL) {
@@ -255,14 +260,18 @@ static int process_line() {
             goto finish;
         }
 
-        if (!(strlen(url) < OTA_URL_STRING_BUFFER_SIZE)) {
+        // alternatively, sizeof((ota_command_data_t *)0)->url)
+        if (!(strlen(url) < sizeof(ota_command_data->url))) {
             ESP_LOGI(TAG, "ota command url too long");
             err = -1;
             goto finish;
         }
-        strcpy(p->url, url);
+        strcpy(ota_command_data->url, url);
 
-        if (pdTRUE != xQueueSend(http_ota_queue, &p, 0)) {
+        // actually, any message will do.
+        message_t msg = {};
+        msg.type = MSG_CMD_OTA;
+        if (pdTRUE != xQueueSend(http_ota_queue, &msg, 0)) {
             err = -1;
             ESP_LOGI(TAG, "failed to enqueue ota request");
             goto finish;
@@ -272,6 +281,7 @@ static int process_line() {
         ESP_LOGI(TAG, "ota request queued, url: %s", url);
     } else if (0 == strcmp(cmd, "PLAY")) {
         cmd_type = CMD_PLAY;
+
         data = malloc(sizeof(play_command_data_t));
         if (data == NULL) {
             err = -1;
@@ -287,15 +297,41 @@ static int process_line() {
             ESP_LOGI(TAG, "play command has no tracks_url");
             goto finish;
         }
+
         if (!(strlen(tracks_url) + TRACK_NAME_LENGTH < URL_BUFFER_SIZE)) {
             err = -1;
             ESP_LOGI(TAG, "play command tracks_url too long");
             goto finish;
         }
+
         strcpy(p->tracks_url, tracks_url);
 
-        char *current_track =
-            cJSON_GetObjectItem(root, "current_track")->valuestring;
+        const cJSON *tracks = cJSON_GetObjectItem(root, "tracks");
+        if (!cJSON_IsArray(tracks)) {
+            err = -1;
+            ESP_LOGI(TAG, "tracks is not an array");
+            goto finish;
+        }
+        
+        p->tracks_array_size = cJSON_GetArraySize(tracks);
+        p->tracks = (track_t*)malloc(p->tracks_array_size * sizeof(track_t));
+        if (p->tracks == NULL) {
+            err = -1;
+            ESP_LOGI(TAG, "failed to allocate memory for tracks");
+            goto finish;
+        }
+
+        // TODO validation
+        for (int i = 0; i < p->tracks_array_size; i++) {
+            cJSON *item = cJSON_GetArrayItem(tracks, i);
+            p->tracks[i].digest = track_name_to_digest(
+                cJSON_GetObjectItem(item, "name")->valuestring);
+            p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
+        }
+
+/*
+        char *tracks =
+            cJSON_GetObjectItem(root, "track")->valuestring;
         if (current_track == NULL) {
             err = -1;
             ESP_LOGI(TAG, "play command has no current_track");
@@ -307,8 +343,12 @@ static int process_line() {
             goto finish;
         }
         p->current_track = track_name_to_digest(current_track);
+*/
 
-        if (pdTRUE != xQueueSend(juggle_jobs_queue, &p, 0)) {
+        message_t msg = {};
+        msg.type = MSG_CMD_PLAY;
+        msg.data = p;
+        if (pdTRUE != xQueueSend(juggler_queue, &msg, 0)) {
             err = -1;
             ESP_LOGI(TAG, "failed to enqueue play request");
             goto finish;
@@ -320,7 +360,7 @@ static int process_line() {
 
 finish:
     if (data)
-        free(data);
+        free(data); // TODO not fully freed!
     if (root)
         cJSON_Delete(root);
     llen = 0;
@@ -361,11 +401,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 }
 
 static void tcp_send(void *arg) {
-    void *handle = NULL;
-
-    while (xQueueReceive(tcp_send_queue, &handle, portMAX_DELAY)) {
-        free(handle);
-        handle = NULL;
+    message_t msg;
+    while (xQueueReceive(tcp_send_queue, &msg, portMAX_DELAY)) {
     }
 }
 
@@ -489,11 +526,12 @@ esp_err_t ota_http_event_handler(esp_http_client_event_t *evt) {
 }
 
 static void http_ota(void *arg) {
-    ota_command_data_t *cmd;
-    xQueueReceive(http_ota_queue, &cmd, portMAX_DELAY);
+    message_t msg;
+
+    xQueueReceive(http_ota_queue, &msg, portMAX_DELAY);
 
     esp_http_client_config_t config = {
-        .url = cmd->url,
+        .url = ota_command_data->url,
         //        .cert_pem = (char *)server_cert_pem_start,
         .event_handler = ota_http_event_handler,
         .keep_alive_enable = true,
@@ -510,19 +548,76 @@ static void http_ota(void *arg) {
     esp_restart();
 }
 
-static void fetch_track(void *arg) {}
+typedef struct {
+    char path[8];
+} chunk_file_path_t;
 
-static void juggle_jobs(void *arg) {
-    play_command_data_t *cmd;
-    while (xQueueReceive(juggle_jobs_queue, &cmd, portMAX_DELAY)) {
-        ESP_LOGI(TAG, "play request received");
+typedef struct {
+    /** fetch gets data_chunk_t out of this queue */
+    QueueHandle_t queue;
+    int buffer_size;
+    char* buffer;
+    char url[URL_BUFFER_SIZE];
+    md5_digest_t digest;
+    int size;
+} fetch_context_t;
+
+/**
+ * fetcher downloads media file and write to chunk file.
+ *
+ * is responsible for freeing config (arg) pointer, but
+ * not queue.
+ */
+static void fetcher(void *arg) {
+    fetch_context_t* ctx = (fetch_context_t*)arg; 
+    esp_err_t err;
+
+    ESP_LOGI(TAG, "fetcher: %s", ctx->url);
+
+    esp_http_client_config_t config = {
+        .url = ctx->url,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if ((err = esp_http_client_open(client, 0)) != ESP_OK) {
+        //
+    } 
+
+    int content_length = esp_http_client_fetch_headers(client);
+    int total_read_len = 0, read_len;
+
+    while (1) {
+        read_len =
+            esp_http_client_read(client, ctx->buffer, ctx->buffer_size);
+
+        if (read_len > 0) {
+            
+        } if (read_len == 0) {
+            ESP_LOGI(TAG, "read_len: %d, errno, %d", read_len, errno);
+            break;
+        } else {
+            
+        }
     }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    
+    ESP_LOGI(TAG, "finished");
+   
+    vTaskDelete(NULL);    
 }
 
+/**
+ * Print sdmmc info for given card
+ */
 static void sdmmc_card_info(const sdmmc_card_t *card) {
     bool print_scr = true;
     bool print_csd = true;
     const char *type;
+
+    char* TAG = pcTaskGetName(NULL);
+
     ESP_LOGI(TAG, "sdmmc name: %s", card->cid.name);
     if (card->is_sdio) {
         type = "SDIO";
@@ -558,40 +653,52 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
     }
 }
 
-void app_main(void) {
-    // esp_err_t is typedef-ed int, so it could be used with lwip/sockets
-    // api, but the value should be interpretted differently.
-    esp_err_t err;
-    int i, j;
+#define CHUNK_FILE_SIZE (1024 * 1024)
 
-    line = (char *)malloc(LINE_LENGTH);
-    memset(line, 0, LINE_LENGTH);
+static FRESULT prepare_chunk_file(const char *vfs_path) {
+    FRESULT fr;
+    FILINFO fno;
+    const char* path = vfs_path + strlen(MOUNT_POINT) + 1;
 
-    event_bits = xEventGroupCreate();
+    fr = f_stat(path, &fno);
+    // fatfs returns FR_DENIED when f_open a directory
+    if (fr == FR_OK && (fno.fattrib & AM_DIR))
+        return FR_DENIED;
 
-    http_ota_queue = xQueueCreate(1, sizeof(void *));
-    xTaskCreate(http_ota, "http_ota", 65536, NULL, 11, NULL);
-
-    juggle_jobs_queue = xQueueCreate(2, sizeof(void *));
-    xTaskCreate(juggle_jobs, "juggle_jobs", 65536, NULL, 11, NULL);
-
-    tcp_send_queue = xQueueCreate(20, sizeof(void *));
-    xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
-    xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
-
-    // init nvs
-    err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
-        // NVS partition was truncated and needs to be erased
-        // Retry nvs_flash_init
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+    if (fr == FR_OK && fno.fsize == CHUNK_FILE_SIZE) {
+        return FR_OK;
     }
+
+    if (fr == FR_OK || fr == FR_NO_FILE) {
+        FIL f;
+        fr = f_open(&f, path, FA_CREATE_ALWAYS | FA_WRITE | FA_READ);
+        if (fr != FR_OK)
+            return fr;
+        fr = f_expand(&f, CHUNK_FILE_SIZE, 1);
+        if (fr != FR_OK) {
+            f_close(&f);
+            return fr;
+        }
+        return f_close(&f);
+    }
+
+    return fr;
+}
+
+/**
+ *
+ */
+static void juggler(void *arg) {
+    const char *TAG = "juggler";
+    esp_err_t err;
+    message_t msg;
+    fetch_context_t contexts[2] = {0};
+    data_chunk_t chunks[16] = {};
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
-        .max_files = 16,
-        .allocation_unit_size = 16 * 1024
+        .max_files = 64,
+        .allocation_unit_size = 64 * 1024
     };
 
     sdmmc_card_t *card;
@@ -629,7 +736,106 @@ void app_main(void) {
                  "Failed to initialize the card (%s). "
                  "Make sure SD card lines have pull-up resistors in place.",
                  esp_err_to_name(err));
-    } 
+    }
+
+    for (int i = 0; i < 2; i++) {
+        contexts[i].buffer_size = 65536;
+        contexts[i].buffer = (char*)malloc(65536);
+        assert(contexts[i].buffer);
+        contexts[i].queue = xQueueCreate(8, sizeof(void*));
+    }
+
+/**
+    FIL ff_file;
+    FRESULT fr = f_open(&ff_file, "00", "w+");
+    ESP_LOGI(TAG, "------------------ fr: %d", fr);
+*/
+      
+     
+    for (int i = 0; i < 16; i++) {
+        int ret;
+        const char* path = chunk_files[i];
+        chunks[i].path = chunk_files[i];
+        
+        FRESULT fr = prepare_chunk_file(path);
+        if (fr != FR_OK) {
+            ESP_LOGI(TAG, "failed to prepare chunk file %s (%d)", path, fr);
+        }
+
+        FILE* fp = fopen(chunks[i].path, "r+");
+
+        if (fp == NULL) {
+            ESP_LOGI(TAG, "failed to open file %s, (%d)", chunks[i].path,
+                     errno);
+        } else {
+            fseek(fp, 0L, SEEK_END);
+            size_t size = ftell(fp);
+            ESP_LOGI(TAG, "size of %s: %d", chunks[i].path, size);
+            chunks[i].fp = fp;
+        }
+    }
+
+    while (xQueueReceive(juggler_queue, &msg, portMAX_DELAY)) {
+        switch (msg.type) {
+        case MSG_CMD_PLAY: {
+            ESP_LOGI(TAG, "play request received");
+            play_command_data_t* data = msg.data;
+
+            fetch_context_t* ctx = &contexts[0];
+            strlcpy(ctx->url, data->tracks_url, 1024);
+            ctx->digest = data->tracks[0].digest;
+            track_url_strlcat(ctx->url, ctx->digest, 1024);    
+            xQueueReset(ctx->queue);
+
+            if (pdPASS != xTaskCreate(fetcher, "fetcher", 16384, ctx, 6, NULL)) {
+              
+            }
+
+            xQueueSend(ctx->queue, &chunks[0], 0);
+            xQueueSend(ctx->queue, &chunks[1], 0);
+        } break;
+        default:
+            break;
+        }
+    }
+}
+
+void app_main(void) {
+    // esp_err_t is typedef-ed int, so it could be used with lwip/sockets
+    // api, but the value should be interpretted differently.
+    esp_err_t err;
+    int i, j;
+
+    line = (char *)malloc(LINE_LENGTH);
+    memset(line, 0, LINE_LENGTH);
+
+    ota_command_data = (ota_command_data_t *)malloc(sizeof(ota_command_data_t));
+
+    event_bits = xEventGroupCreate();
+
+    /** this could be created on demand */
+    http_ota_queue = xQueueCreate(1, sizeof(message_t));
+    xTaskCreate(http_ota, "http_ota", 32768, NULL, 11, NULL);
+
+    juggler_queue = xQueueCreate(20, sizeof(message_t));
+    if (errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY ==
+        xTaskCreate(juggler, "juggler", 32768, NULL, 11, NULL)) {
+        ESP_LOGI(TAG, "failed to create juggler task for memory constraint");
+    }
+
+    tcp_send_queue = xQueueCreate(20, sizeof(void *));
+    xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
+
+    xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
+
+    // init nvs
+    err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
+        // NVS partition was truncated and needs to be erased
+        // Retry nvs_flash_init
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
 
     // init event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());

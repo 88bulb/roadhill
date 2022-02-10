@@ -32,10 +32,10 @@ gateway也会报告自己的状态，是在播放还是已经停止，在播放�
 
 服务器向gateway发送的命令仅有4种：
 
-1. SET_SESSION
-2. PLAY
-3. STOP
-4. QUIT
+1. OTA
+2. CONFIG
+3. PLAY
+4. STOP
 
 Gateway向服务器报告的信息有两种：
 
@@ -78,7 +78,16 @@ firmware属性描述固件；其中version暂无特殊约定；sha256是乐鑫�
 
 
 
+#### TODO
+
+- (device) error report, such as emmc failure.
+- api version support.
+
+
+
 目前系统中还包含了c3模块，但c3模块的固件信息不放在`DeviceInfo`里定义了。
+
+
 
 
 
@@ -104,22 +113,37 @@ STATE_INFO
 
 ```json
 {
+    "api_version": 1,
     "cmd":"OTA",
+    "reply": "ERROR",
+    "reply_serial": 4635,
     "url":"http://10.42.0.1/files/roadhill.bin"
 }
 ```
 
 
 
-### SET_SESSION
+| 属性          | 含义       | 格式          | 值                                |                                         |
+| ------------- | ---------- | ------------- | --------------------------------- | --------------------------------------- |
+| api_version   | api版本    | integer       | 1                                 | 必须                                    |
+| cmd           | 命令       | string (enum) | OTA                               | 必须                                    |
+| *reply        | 是否应答   | string (enum) | FINISH, SUCCESS, ERROR, NONE etc. | 可选（default to NONE, if not provided) |
+| *reply_serial | 应答的序号 | integer       |                                   | 如果reply!=NONE则应该提供reply_serial   |
+| url           | url        | string        |                                   | 必须                                    |
 
-`SET_STAGE`命令设置了一个剧本的上下文，例子如下：
+标注（*）号的是建议，未确定实现；
+
+
+
+### CONFIG
+
+`CONFIG`命令设置工作环境。
 
 ```json
 {
-    "cmd": "SET_SESSION",
-    "version": "1.0",
-    "session_id": "some unique string",
+    "api_version": 1,
+    "cmd": "CONFIG",
+    
     "bulb_firmware": {
         "url": "http://10.42.0.1/files/bulbcast.bin",
         "sha256": "21e831461f432ca453a3b9b97e0870c2807946f559d2574c5d81a571f08755fe"
@@ -129,11 +153,6 @@ STATE_INFO
         [],
         ["7a0764e6a70a", "7a0764e6a70a"],
         ["7a0764b68533"]
-    ],
-    "tracks_url": "http://10.42.0.1/files/album1135",
-    "tracks": [
-        "57dc4ec6ddce686cce6460a04bb5cc31",
-        "43a5155e9d3772406fb51b9fb3c5e668"
     ]
 }
 ```
@@ -190,13 +209,15 @@ STATE_INFO
 
 ### PLAY
 
-cloud->gateway
+
 
 ```json
 {
+    "api_version": 1,
 	"cmd": "PLAY",
-    "version": "1.0",
-	"track": "57dc4ec6ddce686cce6460a04bb5cc31",
+    "reply": "ALL"
+    "reply_serial": 
+	"current_track": "57dc4ec6ddce686cce6460a04bb5cc31",
     "next_tracks": [
         "43a5155e9d3772406fb51b9fb3c5e668",
         "972f619d7f82864a3b11b0e7b37d993e"
@@ -214,7 +235,7 @@ cloud->gateway
 
 命令格式版本。
 
-#### track
+#### current_track
 
 需要播放的音频文件，该track必须在当前session的tracks列表内，否则视为错误。
 
@@ -242,7 +263,7 @@ lighting包含时间戳和灯码，但灯码没有仔细推敲模板化的可能
 
 ```json
 {
-	"cmd": "stop"
+	"cmd": "STOP"
 }
 ```
 
@@ -250,29 +271,135 @@ lighting包含时间戳和灯码，但灯码没有仔细推敲模板化的可能
 
 
 
-### PING (optional, not sure)
+## Roadhill Design
 
-cloud->gateway
+### FreeRTOS Tasks
 
-```json
-{
-    "cmd": "ping"
-}
+程序结构上用FreeRTOS任务划分，包括：
+
+1. main task；
+2. http ota，负责ota升级（a/b升级）；(完成)
+3. tcp receive，负责接收和解析云命令；（大部分完成）
+4. tcp send，负责向云发送信息；（有框架无内部实现，用于发送状态或错误
+5. juggler，juggler是资源和子任务的分发器；（正在做）
+6. fetcher，fetcher是下载媒体文件的下载器，fetcher是动态任务，有生命周期；（正在做）；
+7. cache，cacher负责存储和提取文件cache；（未开始）；
+8. audible，audible是音频播放任务，使用audio_pipeline工作；（未开始）；
+
+
+
+灯的播放详细设计还没有完全完成。灯谱包含在PLAY消息内，该消息JSON解析后的数据结构完整传递给juggler，juggler传递给audible。应该是先跑通音频下载播放任务之后，
+
+
+
+### Juggler
+
+`juggler`维护一组文件（64-256个）。每个文件内包含一个数据块，一个`header`，包含数据块的描述，和一个digest，表示文件的完整性。
+
+`juggler`使用这些文件完成如下任务：
+
+1. 让`fetcher`下载音频文件，一块一块的存储在数据块文件中，还给`juggler`；`fetcher`是写入者。
+2. 把数据块文件交给`audible`播放，工作在只读模式。
+3. 把一组数据块文件交给`cache`，写入cache文件，工作在只读模式。
+
+原则上`juggler`自己并不读写文件。一个例外的优化是`juggler`在启动时检查这些文件，如果发现有完整的文件尚未cache，可以交给cache。但没有这个优化不影响设备正常工作。
+
+#### 通讯
+
+`juggler`使用`juggler_queue`接收消息；`juggler`接收的消息包括：
+
+1. 来自`tcp_receive`的命令，CONFIG， PLAY， STOP；
+2. 来自`fetcher`的返回，包括数据块文件，结束命令；从fetcher来的消息可以看作流式的emitter；
+3. 来自`cache`的返回，可以是数据块文件，也可能是内存块，或者命令返回结果；
+
+
+
+
+
+
+
+
+
+数据块以256K为单位，存放数据块的文件以320K大小，因为文件系统使用64k（64 * 1024）大小的簇。
+
+文件使用md5标记其完整性
+
+
+
+first 1K (first 16byte ) 
+
+header
+
+总文件的md5（16字节）+ 总文件的大小（4字节）+ 当前块的位置（4字节）+ 当前块的大小（4字节）=512字节
+
+```c
+typedef struct {
+    uint8_t bytes[16];
+} md5_digest_t;
+
+typedef struct {
+    md5_digest_t 	file_digest;
+    uint32_t		file_size;
+    uint32_t		chunk_index;
+    uint32_t		chunk_size;
+} data_chunk_header_t;
 ```
 
 
 
-### QUIT (not sure)
-
-```json
-{
-	"cmd": "quit"
-}
-```
-
-会立刻停止播放和让所有的灯重启。
 
 
+写入顺序
 
-## roadhill
+1. 先擦除最后16字节，flush；
+2. 从0K处开始写入文件内容，最大256KB（256 * 1024）；
+3. 从1K处写入Header
+4. 
+
+
+
+juggler发出的message
+
+给fetcher的
+
+下载的url，总文件hash，文件大小，一定数量的data chunk file；
+
+
+
+### Fetcher
+
+Fetcher是唯一的动态任务，由Juggler创建，在结束时销毁。
+
+Juggler和Fetcher使用[FreeRTOS Queue](https://www.freertos.org/Embedded-RTOS-Queues.html)通讯，Fetcher使用的Queue也是动态创建的。
+
+
+
+| 资源                  | 资源内容                                              | 创建者  | 销毁者  |      |
+| --------------------- | ----------------------------------------------------- | ------- | ------- | ---- |
+| Fetcher Task          | FreeRTOS task                                         | Juggler | Juggler |      |
+| Fetcher's recv buffer | memory                                                | Fetcher | Fetcher |      |
+| Fetcher's Queue       | FreeRTOS queue                                        | Juggler | Juggler |      |
+| Fetch Config          | struct，包含queue, url, digest, (possibly) file size. | Juggler | Juggler |      |
+
+
+
+
+
+
+
+
+
+## Message Data Structure
+
+### OTA
+
+### PLAY
+
+
+
+
+
+
+
+
 

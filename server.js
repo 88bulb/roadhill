@@ -37,10 +37,12 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
                 cmd: 'PLAY',
                 version: '1.0',
                 tracks_url: 'http://10.42.0.1/files/album000001',
-                current_track: '8b76c5faf3fd66b66d5a36e6ffe9e7bb.mp3',
-                next_tracks: [],
-                lighting: [],
+                tracks: [{
+                  name: '8b76c5faf3fd66b66d5a36e6ffe9e7bb.mp3',
+                  size: 6817965
+                }],
                 lighting_time_unit: 'sec',
+                lighting: [],
                 start: 'immediate'
               }) + '\n'
               console.log(`outgoing -> ${outgoing}`)
