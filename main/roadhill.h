@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 
 #define container_of(ptr, type, member)                                        \
@@ -13,6 +14,7 @@ typedef enum {
     MSG_CMD_PLAY,
     MSG_CMD_STOP,
     MSG_FETCH_TO_FILE,
+    MSG_CHUNK_FETCHED,
 } message_type_t;
 
 typedef struct {
@@ -42,6 +44,7 @@ typedef struct {
 #define URL_BUFFER_SIZE (1024)
 #define TRACK_NAME_LENGTH (32)
 #define FILENAME_BUFFER_SIZE (40)
+
 typedef struct {
     uint32_t reply_bits;
     uint32_t reply_serial;
@@ -50,30 +53,25 @@ typedef struct {
     track_t* tracks;
     int blinks_array_size;
     blink_t* blinks;
-//    void (*free)(play
 } play_command_data_t;
 
-typedef enum {
-    DCST_NOUSE = 0,
-    DCST_FETCH,
-    DCST_AUDIO,
-    DCST_CACHE
-} data_chunk_status_t;
-
-/**
- * chunk_header_t is the first member of data_chunk_t (type punning)
- */
+/********************************************************************************
+ *
+ * 
+ *
+ *
+ ********************************************************************************/
 typedef struct {
-    md5_digest_t file_digest;   // 16 bytes
-    int file_size;              // 4 bytes
-    int chunk_index;            // 4 bytes
-    int chunk_size;             // 4 bytes
+    md5_digest_t file_digest; // 16 bytes
+    int file_size;            // 4 bytes
+    int chunk_index;          // 4 bytes
+    int chunk_size;           // 4 bytes
 } chunk_metadata_t;
 
 typedef struct {
     chunk_metadata_t metadata;
-    const char* path;
-    FILE* fp;
-    md5_digest_t chunk_digest; 
-} data_chunk_t;
+    const char *path;
+    FILE *fp;
+    md5_digest_t chunk_digest;
+} chunk_data_t;
 

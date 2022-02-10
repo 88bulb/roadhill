@@ -19,14 +19,28 @@
 #include "esp_https_ota.h"
 #include "esp_rom_md5.h"
 #include "esp_vfs_fat.h"
+#include "esp_rom_md5.h"
 #include "nvs_flash.h"
 
 #include "esp_netif.h"
 
+#include "audio_element.h"
+#include "audio_pipeline.h"
+#include "audio_event_iface.h"
+#include "audio_mem.h"
+#include "audio_common.h"
+#include "i2s_stream.h"
+#include "mp3_decoder.h"
+
 #include "esp_peripherals.h"
+#include "periph_touch.h"
+#include "periph_adc_button.h"
+#include "periph_button.h"
+#include "board.h"
 
 #define MOUNT_POINT "/emmc"
-#define CHUNK_DIR(x)   "/emmc/00/" x
+#define CHUNK_DIR(x) "/emmc/00/" x
+#define CHUNK_FILE_SIZE (1024 * 1024)
 
 #include "roadhill.h"
 
@@ -164,7 +178,7 @@ md5_digest_t track_name_to_digest(char *name) {
         uint8_t u8;
         char high = name[2 * i];
         char low = name[2 * i + 1];
-    
+
         if (high >= 'a' && high <= 'f') {
             u8 = (high - 'a' + 10) << 4;
         } else {
@@ -178,7 +192,6 @@ md5_digest_t track_name_to_digest(char *name) {
         }
 
         digest.bytes[i] = u8;
-
     }
     return digest;
 }
@@ -312,9 +325,9 @@ static int process_line() {
             ESP_LOGI(TAG, "tracks is not an array");
             goto finish;
         }
-        
+
         p->tracks_array_size = cJSON_GetArraySize(tracks);
-        p->tracks = (track_t*)malloc(p->tracks_array_size * sizeof(track_t));
+        p->tracks = (track_t *)malloc(p->tracks_array_size * sizeof(track_t));
         if (p->tracks == NULL) {
             err = -1;
             ESP_LOGI(TAG, "failed to allocate memory for tracks");
@@ -329,21 +342,21 @@ static int process_line() {
             p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
         }
 
-/*
-        char *tracks =
-            cJSON_GetObjectItem(root, "track")->valuestring;
-        if (current_track == NULL) {
-            err = -1;
-            ESP_LOGI(TAG, "play command has no current_track");
-            goto finish;
-        }
-        if (!is_valid_track_name(current_track)) {
-            err = -1;
-            ESP_LOGI(TAG, "play command current_track invalid");
-            goto finish;
-        }
-        p->current_track = track_name_to_digest(current_track);
-*/
+        /*
+                char *tracks =
+                    cJSON_GetObjectItem(root, "track")->valuestring;
+                if (current_track == NULL) {
+                    err = -1;
+                    ESP_LOGI(TAG, "play command has no current_track");
+                    goto finish;
+                }
+                if (!is_valid_track_name(current_track)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "play command current_track invalid");
+                    goto finish;
+                }
+                p->current_track = track_name_to_digest(current_track);
+        */
 
         message_t msg = {};
         msg.type = MSG_CMD_PLAY;
@@ -553,13 +566,17 @@ typedef struct {
 } chunk_file_path_t;
 
 typedef struct {
-    /** fetch gets data_chunk_t out of this queue */
-    QueueHandle_t queue;
-    int buffer_size;
-    char* buffer;
+    // TODO use pointer
     char url[URL_BUFFER_SIZE];
     md5_digest_t digest;
-    int size;
+    int track_size;
+
+    /** fetch gets chunk_data_t out of this queue */
+    int fetch_buffer_size;
+    char *fetch_buffer;
+
+    QueueHandle_t fetch_chunk_in;
+    QueueHandle_t play_chunk_in;
 } fetch_context_t;
 
 /**
@@ -569,10 +586,10 @@ typedef struct {
  * not queue.
  */
 static void fetcher(void *arg) {
-    fetch_context_t* ctx = (fetch_context_t*)arg; 
+    fetch_context_t *ctx = (fetch_context_t *)arg;
     esp_err_t err;
 
-    ESP_LOGI(TAG, "fetcher: %s", ctx->url);
+    ESP_LOGI(TAG, "fetch: %s", ctx->url);
 
     esp_http_client_config_t config = {
         .url = ctx->url,
@@ -580,32 +597,99 @@ static void fetcher(void *arg) {
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if ((err = esp_http_client_open(client, 0)) != ESP_OK) {
-        //
-    } 
+        // TODO
+    }
 
     int content_length = esp_http_client_fetch_headers(client);
-    int total_read_len = 0, read_len;
+    // ULLONG_MAX in limits.h
+    if (content_length == -1) {
+        content_length = ctx->track_size;
+    } else if (content_length != ctx->track_size) {
+        // TODO
+    }
 
+    chunk_data_t* chunk = NULL;
+    int total_read_len = 0, read_len;
+    int total_chunks = 0, chunk_written = 0;
     while (1) {
-        read_len =
-            esp_http_client_read(client, ctx->buffer, ctx->buffer_size);
+        read_len = esp_http_client_read(client, ctx->fetch_buffer,
+                                        ctx->fetch_buffer_size);
 
         if (read_len > 0) {
-            
-        } if (read_len == 0) {
-            ESP_LOGI(TAG, "read_len: %d, errno, %d", read_len, errno);
+            if (chunk == NULL) {
+                // TODO handle error
+                xQueueReceive(ctx->fetch_chunk_in, &chunk, portMAX_DELAY); 
+
+                if (!chunk) {
+                    ESP_LOGI(TAG, "!!!! chunk is NULL");
+                }
+
+                if (!chunk->fp) {
+                    ESP_LOGI(TAG, "!!! chunk-fp is NULL");
+                }
+
+                fseek(chunk->fp, 0L, SEEK_SET);
+                chunk_written = 0;
+            }
+
+            int writing, left;
+            if (chunk_written + read_len <= CHUNK_FILE_SIZE) {
+                writing = read_len;
+                left = 0;
+            } else {
+                writing = CHUNK_FILE_SIZE - chunk_written;
+                left = read_len - writing;
+            } 
+
+            // TODO assuming all written 
+            int written = fwrite(ctx->fetch_buffer, 1, writing, chunk->fp);
+            if (written < writing) {
+                ESP_LOGE(TAG, "writing %d bytes, written %d bytes", writing,
+                         written);
+            }
+
+            chunk_written += writing;
+
+            if (chunk_written == CHUNK_FILE_SIZE) {
+                chunk->metadata.chunk_index = total_chunks++;
+                chunk->metadata.chunk_size = chunk_written;
+
+                message_t msg;
+                msg.type = MSG_CHUNK_FETCHED;
+                msg.data = chunk;
+
+                xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+
+                xQueueReceive(ctx->fetch_chunk_in, &chunk, portMAX_DELAY);
+                chunk_written = 0;                
+                fseek(chunk->fp, 0L, SEEK_SET);                
+                if (left > 0) {
+                    fwrite(&(ctx->fetch_buffer[writing]), 1, left, chunk->fp);
+                    chunk_written += left;
+                }                 
+            }
+
+            total_read_len += read_len;
+        } else if (read_len == 0) {
+            chunk->metadata.chunk_index = total_chunks++;
+            chunk->metadata.chunk_size = chunk_written;
+
+            message_t msg;
+            msg.type = MSG_CHUNK_FETCHED;
+            msg.data = chunk;
+
+            xQueueSend(juggler_queue, &msg, portMAX_DELAY);
             break;
         } else {
-            
         }
     }
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    
+
     ESP_LOGI(TAG, "finished");
-   
-    vTaskDelete(NULL);    
+
+    vTaskDelete(NULL);
 }
 
 /**
@@ -616,7 +700,7 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
     bool print_csd = true;
     const char *type;
 
-    char* TAG = pcTaskGetName(NULL);
+    char *TAG = pcTaskGetName(NULL);
 
     ESP_LOGI(TAG, "sdmmc name: %s", card->cid.name);
     if (card->is_sdio) {
@@ -653,12 +737,10 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
     }
 }
 
-#define CHUNK_FILE_SIZE (1024 * 1024)
-
 static FRESULT prepare_chunk_file(const char *vfs_path) {
     FRESULT fr;
     FILINFO fno;
-    const char* path = vfs_path + strlen(MOUNT_POINT) + 1;
+    const char *path = vfs_path + strlen(MOUNT_POINT) + 1;
 
     fr = f_stat(path, &fno);
     // fatfs returns FR_DENIED when f_open a directory
@@ -693,13 +775,12 @@ static void juggler(void *arg) {
     esp_err_t err;
     message_t msg;
     fetch_context_t contexts[2] = {0};
-    data_chunk_t chunks[16] = {};
+    chunk_data_t chunks[16] = {};
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
         .max_files = 64,
-        .allocation_unit_size = 64 * 1024
-    };
+        .allocation_unit_size = 64 * 1024};
 
     sdmmc_card_t *card;
     const char mount_point[] = MOUNT_POINT;
@@ -739,31 +820,25 @@ static void juggler(void *arg) {
     }
 
     for (int i = 0; i < 2; i++) {
-        contexts[i].buffer_size = 65536;
-        contexts[i].buffer = (char*)malloc(65536);
-        assert(contexts[i].buffer);
-        contexts[i].queue = xQueueCreate(8, sizeof(void*));
+        contexts[i].fetch_buffer_size = 65536;
+        contexts[i].fetch_buffer = (char *)malloc(65536);
+        assert(contexts[i].fetch_buffer);
+
+        contexts[i].fetch_chunk_in = xQueueCreate(16, sizeof(void *));
+        contexts[i].play_chunk_in = xQueueCreate(16, sizeof(void *));
     }
 
-/**
-    FIL ff_file;
-    FRESULT fr = f_open(&ff_file, "00", "w+");
-    ESP_LOGI(TAG, "------------------ fr: %d", fr);
-*/
-      
-     
     for (int i = 0; i < 16; i++) {
-        int ret;
-        const char* path = chunk_files[i];
+        const char *path = chunk_files[i];
         chunks[i].path = chunk_files[i];
-        
+
         FRESULT fr = prepare_chunk_file(path);
         if (fr != FR_OK) {
             ESP_LOGI(TAG, "failed to prepare chunk file %s (%d)", path, fr);
+            continue;
         }
 
-        FILE* fp = fopen(chunks[i].path, "r+");
-
+        FILE *fp = fopen(chunks[i].path, "r+");
         if (fp == NULL) {
             ESP_LOGI(TAG, "failed to open file %s, (%d)", chunks[i].path,
                      errno);
@@ -779,23 +854,124 @@ static void juggler(void *arg) {
         switch (msg.type) {
         case MSG_CMD_PLAY: {
             ESP_LOGI(TAG, "play request received");
-            play_command_data_t* data = msg.data;
+            play_command_data_t *data = msg.data;
 
-            fetch_context_t* ctx = &contexts[0];
+            fetch_context_t *ctx = &contexts[0];
             strlcpy(ctx->url, data->tracks_url, 1024);
-            ctx->digest = data->tracks[0].digest;
-            track_url_strlcat(ctx->url, ctx->digest, 1024);    
-            xQueueReset(ctx->queue);
 
-            if (pdPASS != xTaskCreate(fetcher, "fetcher", 16384, ctx, 6, NULL)) {
-              
+            ctx->digest = data->tracks[0].digest;
+            track_url_strlcat(ctx->url, ctx->digest, 1024);
+
+            if (pdPASS !=
+                xTaskCreate(fetcher, "fetcher", 16384, ctx, 6, NULL)) {
             }
 
-            xQueueSend(ctx->queue, &chunks[0], 0);
-            xQueueSend(ctx->queue, &chunks[1], 0);
+            for (int i = 0; i < 7; i++) {
+                chunk_data_t* cp = &chunks[i];
+                xQueueSend(ctx->fetch_chunk_in, &cp, 0);
+            }
+        } break;
+        case MSG_CHUNK_FETCHED: {
+            chunk_data_t* chunk = (chunk_data_t*)msg.data;
+            ESP_LOGI(TAG, "chunk ?? index: %d, size: %d",
+                     chunk->metadata.chunk_index, chunk->metadata.chunk_size);
+            fetch_context_t *ctx = &contexts[0];
+            xQueueSend(ctx->play_chunk_in, &chunk, portMAX_DELAY);
         } break;
         default:
+            ESP_LOGI(TAG, "message received");
             break;
+        }
+    }
+}
+
+int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
+                      TickType_t wait_time, void *ctx) {
+/**
+    int read_size = file_marker.end - file_marker.start - file_marker.pos;
+    if (read_size == 0) {
+        return AEL_IO_DONE;
+    } else if (len < read_size) {
+        read_size = len;
+    }
+    memcpy(buf, file_marker.start + file_marker.pos, read_size);
+    file_marker.pos += read_size;
+    return read_size;
+*/
+    return 0;
+}
+
+static void audible(void *arg) {
+    const char *TAG = "audible";
+
+    audio_pipeline_handle_t pipeline;
+    audio_element_handle_t i2s_stream_writer, mp3_decoder;
+
+    ESP_LOGI(TAG, "[ 1 ] Start audio codec chip");
+    audio_board_handle_t board_handle = audio_board_init();
+    audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_BOTH,
+                         AUDIO_HAL_CTRL_START);
+
+    int player_volume;
+    audio_hal_get_volume(board_handle->audio_hal, &player_volume);
+
+    ESP_LOGI(TAG, "[ 2 ] Create audio pipeline, add all elements to pipeline, "
+                  "and subscribe pipeline event");
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    pipeline = audio_pipeline_init(&pipeline_cfg);
+    mem_assert(pipeline);
+
+    ESP_LOGI(TAG, "[2.1] Create mp3 decoder to decode mp3 file and set custom "
+                  "read callback");
+    mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
+    mp3_decoder = mp3_decoder_init(&mp3_cfg);
+    audio_element_set_read_cb(mp3_decoder, mp3_music_read_cb, NULL);
+
+    ESP_LOGI(TAG, "[2.2] Create i2s stream to write data to codec chip");
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
+    i2s_cfg.type = AUDIO_STREAM_WRITER;
+    i2s_stream_writer = i2s_stream_init(&i2s_cfg);
+
+    ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
+    audio_pipeline_register(pipeline, mp3_decoder, "mp3");
+    audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
+
+    ESP_LOGI(TAG,
+             "[2.4] Link it together "
+             "[mp3_music_read_cb]-->mp3_decoder-->i2s_stream-->[codec_chip]");
+    const char *link_tag[2] = {"mp3", "i2s"};
+    audio_pipeline_link(pipeline, &link_tag[0], 2);
+
+    ESP_LOGI(TAG, "[ 3 ] Initialize peripherals");
+    esp_periph_config_t periph_cfg = DEFAULT_ESP_PERIPH_SET_CONFIG();
+    esp_periph_set_handle_t set = esp_periph_set_init(&periph_cfg);
+
+    ESP_LOGI(TAG, "[3.1] Initialize keys on board");
+    audio_board_key_init(set);
+
+    ESP_LOGI(TAG, "[ 4 ] Set up  event listener");
+    audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
+    audio_event_iface_handle_t evt = audio_event_iface_init(&evt_cfg);
+
+    ESP_LOGI(TAG, "[4.1] Listening event from all elements of pipeline");
+    audio_pipeline_set_listener(pipeline, evt);
+
+    ESP_LOGI(TAG, "[4.2] Listening event from peripherals");
+    audio_event_iface_set_listener(esp_periph_set_get_event_iface(set), evt);
+
+    ESP_LOGW(TAG, "[ 5 ] Tap touch buttons to control music player:");
+    ESP_LOGW(TAG, "      [Play] to start, pause and resume, [Set] to stop.");
+    ESP_LOGW(TAG, "      [Vol-] or [Vol+] to adjust volume.");
+
+    ESP_LOGI(TAG, "[ 5.1 ] Start audio_pipeline");
+    // set_next_file_marker();
+    audio_pipeline_run(pipeline);
+
+    while (1) {
+        audio_event_iface_msg_t msg;
+        esp_err_t ret = audio_event_iface_listen(evt, &msg, portMAX_DELAY);
+        if (ret != ESP_OK) {
+            continue;
         }
     }
 }
