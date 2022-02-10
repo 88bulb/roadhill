@@ -81,6 +81,7 @@ static EventGroupHandle_t event_bits;
 static QueueHandle_t http_ota_queue;
 static QueueHandle_t tcp_send_queue;
 static QueueHandle_t juggler_queue;
+static QueueHandle_t audible_queue;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -800,7 +801,7 @@ static void juggler(void *arg) {
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
     // To use 1-line SD mode, change this to 1:
-    slot_config.width = 4;
+    slot_config.width = 1;
 
     // Enable internal pullups on enabled pins. The internal pullups
     // are insufficient however, please make sure 10k external pullups are
@@ -875,8 +876,10 @@ static void juggler(void *arg) {
             chunk_data_t* chunk = (chunk_data_t*)msg.data;
             ESP_LOGI(TAG, "chunk ?? index: %d, size: %d",
                      chunk->metadata.chunk_index, chunk->metadata.chunk_size);
-            fetch_context_t *ctx = &contexts[0];
-            xQueueSend(ctx->play_chunk_in, &chunk, portMAX_DELAY);
+            xQueueSend(audible_queue, &chunk, portMAX_DELAY);
+        } break;
+        case MSG_CHUNK_PLAYED: {
+            ESP_LOGI(TAG, "(mp3) chunk played");
         } break;
         default:
             ESP_LOGI(TAG, "message received");
@@ -885,20 +888,46 @@ static void juggler(void *arg) {
     }
 }
 
-int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
-                      TickType_t wait_time, void *ctx) {
-/**
-    int read_size = file_marker.end - file_marker.start - file_marker.pos;
-    if (read_size == 0) {
-        return AEL_IO_DONE;
-    } else if (len < read_size) {
-        read_size = len;
+static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
+                             TickType_t wait_time, void *ctx) {
+    /**
+        int read_size = file_marker.end - file_marker.start - file_marker.pos;
+        if (read_size == 0) {
+            return AEL_IO_DONE;
+        } else if (len < read_size) {
+            read_size = len;
+        }
+        memcpy(buf, file_marker.start + file_marker.pos, read_size);
+        file_marker.pos += read_size;
+        return read_size;
+    */
+
+    static chunk_data_t* chunk = NULL;
+    static int chunk_read = 0;
+
+    if (chunk == NULL) {
+        // TODO
+        xQueueReceive(audible_queue, &chunk, wait_time); 
+        chunk_read = 0;
+        fseek(chunk->fp, 0L, SEEK_SET);
     }
-    memcpy(buf, file_marker.start + file_marker.pos, read_size);
-    file_marker.pos += read_size;
-    return read_size;
-*/
-    return 0;
+
+    int chunk_size = chunk->metadata.chunk_size;
+    int chunk_left = chunk_size - chunk_read; 
+    int reading = (len <= chunk_left) ? len : chunk_left;
+    int read = fread(buf, 1, reading, chunk->fp);
+    chunk_read += read;
+    if (chunk_read == chunk_size) {
+        message_t msg;
+        msg.type = MSG_CHUNK_PLAYED;
+        msg.data = chunk;
+        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+
+        chunk_read = 0;
+        chunk = NULL;
+    }
+    ESP_LOGI("audio", "music read cb, %d bytes read", read);
+    return read;
 }
 
 static void audible(void *arg) {
@@ -973,6 +1002,87 @@ static void audible(void *arg) {
         if (ret != ESP_OK) {
             continue;
         }
+
+        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT &&
+            msg.source == (void *)mp3_decoder &&
+            msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
+            audio_element_info_t music_info = {0};
+            audio_element_getinfo(mp3_decoder, &music_info);
+            ESP_LOGI(TAG,
+                     "[ * ] Receive music info from mp3 decoder, "
+                     "sample_rates=%d, bits=%d, ch=%d",
+                     music_info.sample_rates, music_info.bits,
+                     music_info.channels);
+            audio_element_setinfo(i2s_stream_writer, &music_info);
+            i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates,
+                               music_info.bits, music_info.channels);
+            continue;
+        }
+
+        if ((msg.source_type == PERIPH_ID_TOUCH ||
+             msg.source_type == PERIPH_ID_BUTTON ||
+             msg.source_type == PERIPH_ID_ADC_BTN) &&
+            (msg.cmd == PERIPH_TOUCH_TAP || msg.cmd == PERIPH_BUTTON_PRESSED ||
+             msg.cmd == PERIPH_ADC_BUTTON_PRESSED)) {
+            if ((int)msg.data == get_input_play_id()) {
+                ESP_LOGI(TAG, "[ * ] [Play] touch tap event");
+                audio_element_state_t el_state =
+                    audio_element_get_state(i2s_stream_writer);
+                switch (el_state) {
+                case AEL_STATE_INIT:
+                    ESP_LOGI(TAG, "[ * ] Starting audio pipeline");
+                    audio_pipeline_run(pipeline);
+                    break;
+                case AEL_STATE_RUNNING:
+                    ESP_LOGI(TAG, "[ * ] Pausing audio pipeline");
+                    audio_pipeline_pause(pipeline);
+                    break;
+                case AEL_STATE_PAUSED:
+                    ESP_LOGI(TAG, "[ * ] Resuming audio pipeline");
+                    audio_pipeline_resume(pipeline);
+                    break;
+                case AEL_STATE_FINISHED:
+                    ESP_LOGI(TAG, "[ * ] Rewinding audio pipeline");
+                    audio_pipeline_reset_ringbuffer(pipeline);
+                    audio_pipeline_reset_elements(pipeline);
+                    audio_pipeline_change_state(pipeline, AEL_STATE_INIT);
+                    // set_next_file_marker();
+                    audio_pipeline_run(pipeline);
+                    break;
+                default:
+                    ESP_LOGI(TAG, "[ * ] Not supported state %d", el_state);
+                }
+            } else if ((int)msg.data == get_input_set_id()) {
+                ESP_LOGI(TAG, "[ * ] [Set] touch tap event");
+                ESP_LOGI(TAG, "[ * ] Stopping audio pipeline");
+                break;
+            } else if ((int)msg.data == get_input_mode_id()) {
+                ESP_LOGI(TAG, "[ * ] [mode] tap event");
+                audio_pipeline_stop(pipeline);
+                audio_pipeline_wait_for_stop(pipeline);
+                audio_pipeline_terminate(pipeline);
+                audio_pipeline_reset_ringbuffer(pipeline);
+                audio_pipeline_reset_elements(pipeline);
+                // set_next_file_marker();
+                audio_pipeline_run(pipeline);
+            } else if ((int)msg.data == get_input_volup_id()) {
+                ESP_LOGI(TAG, "[ * ] [Vol+] touch tap event");
+                player_volume += 10;
+                if (player_volume > 100) {
+                    player_volume = 100;
+                }
+                audio_hal_set_volume(board_handle->audio_hal, player_volume);
+                ESP_LOGI(TAG, "[ * ] Volume set to %d %%", player_volume);
+            } else if ((int)msg.data == get_input_voldown_id()) {
+                ESP_LOGI(TAG, "[ * ] [Vol-] touch tap event");
+                player_volume -= 10;
+                if (player_volume < 0) {
+                    player_volume = 0;
+                }
+                audio_hal_set_volume(board_handle->audio_hal, player_volume);
+                ESP_LOGI(TAG, "[ * ] Volume set to %d %%", player_volume);
+            }
+        }
     }
 }
 
@@ -1003,6 +1113,9 @@ void app_main(void) {
     xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
 
     xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
+    
+    audible_queue = xQueueCreate(8, sizeof(void *));
+    xTaskCreatePinnedToCore(audible, "audible", 4096, NULL, 18, NULL, 1);
 
     // init nvs
     err = nvs_flash_init();

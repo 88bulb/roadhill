@@ -13,8 +13,8 @@ typedef enum {
     MSG_CMD_CONFIG,
     MSG_CMD_PLAY,
     MSG_CMD_STOP,
-    MSG_FETCH_TO_FILE,
     MSG_CHUNK_FETCHED,
+    MSG_CHUNK_PLAYED,
 } message_type_t;
 
 typedef struct {
