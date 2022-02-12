@@ -36,7 +36,10 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
               const outgoing = JSON.stringify({
                 cmd: 'PLAY',
                 version: '1.0',
-                tracks_url: 'http://10.42.0.1/files/album000001',
+// http://shinuojbs-1306173101.cos.ap-shanghai.myqcloud.com/sgd_audio/8b76c5faf3fd66b66d5a36e6ffe9e7bb.mp3
+
+//                tracks_url: 'http://10.42.0.1/files/album000001',
+                tracks_url: 'http://shinuojbs-1306173101.cos.ap-shanghai.myqcloud.com/sgd_audio',
                 tracks: [{
                   name: '8b76c5faf3fd66b66d5a36e6ffe9e7bb.mp3',
                   size: 6817965
