@@ -22,6 +22,8 @@
 #include "esp_rom_md5.h"
 #include "nvs_flash.h"
 
+#include "esp_debug_helpers.h"
+
 #include "esp_netif.h"
 
 #include "audio_element.h"
@@ -31,6 +33,7 @@
 #include "audio_common.h"
 #include "i2s_stream.h"
 #include "mp3_decoder.h"
+#include "raw_stream.h"
 
 #include "esp_peripherals.h"
 #include "periph_touch.h"
@@ -901,6 +904,8 @@ static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
         file_marker.pos += read_size;
         return read_size;
     */
+//    esp_backtrace_print(20);
+//    vTaskDelay(portMAX_DELAY);
 
     static chunk_data_t* chunk = NULL;
     static int chunk_read = 0;
@@ -922,11 +927,10 @@ static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
         msg.type = MSG_CHUNK_PLAYED;
         msg.data = chunk;
         xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-
         chunk_read = 0;
         chunk = NULL;
     }
-    ESP_LOGI("audio", "music read cb, %d bytes read", read);
+//    ESP_LOGI("audio", "music read cb, %d bytes read", read);
     return read;
 }
 
@@ -950,9 +954,30 @@ static void audible(void *arg) {
     pipeline = audio_pipeline_init(&pipeline_cfg);
     mem_assert(pipeline);
 
+#if 0
+#define MP3_DECODER_TASK_STACK_SIZE (5 * 1024)
+#define MP3_DECODER_TASK_CORE (0)
+#define MP3_DECODER_TASK_PRIO (5)
+#define MP3_DECODER_RINGBUFFER_SIZE (2 * 1024)
+
+#define DEFAULT_MP3_DECODER_CONFIG()                                           \
+    {                                                                          \
+        .out_rb_size = MP3_DECODER_RINGBUFFER_SIZE,                            \
+        .task_stack = MP3_DECODER_TASK_STACK_SIZE,                             \
+        .task_core = MP3_DECODER_TASK_CORE,                                    \
+        .task_prio = MP3_DECODER_TASK_PRIO, .stack_in_ext = true,              \
+    }
+#endif
+
     ESP_LOGI(TAG, "[2.1] Create mp3 decoder to decode mp3 file and set custom "
                   "read callback");
-    mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
+    mp3_decoder_cfg_t mp3_cfg = {
+        .out_rb_size = 64 * 1024,
+        .task_stack = 6 * 1024,
+        .task_core = 1,
+        .task_prio = 20,
+        .stack_in_ext = true,
+    };
     mp3_decoder = mp3_decoder_init(&mp3_cfg);
     audio_element_set_read_cb(mp3_decoder, mp3_music_read_cb, NULL);
 
