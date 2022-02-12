@@ -804,7 +804,7 @@ static void juggler(void *arg) {
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
     // To use 1-line SD mode, change this to 1:
-    slot_config.width = 1;
+    slot_config.width = 4;
 
     // Enable internal pullups on enabled pins. The internal pullups
     // are insufficient however, please make sure 10k external pullups are
@@ -1001,7 +1001,14 @@ static void audible(void *arg) {
     esp_periph_set_handle_t set = esp_periph_set_init(&periph_cfg);
 
     ESP_LOGI(TAG, "[3.1] Initialize keys on board");
-    audio_board_key_init(set);
+
+    // audio_board_key_init(set);
+    periph_button_cfg_t btn_cfg = {
+        .gpio_mask = (1ULL << get_input_rec_id()) |
+                     (1ULL << get_input_mode_id()), // REC BTN & MODE BTN
+    };
+    esp_periph_handle_t button_handle = periph_button_init(&btn_cfg);
+    esp_periph_start(set, button_handle);
 
     ESP_LOGI(TAG, "[ 4 ] Set up  event listener");
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
