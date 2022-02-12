@@ -115,8 +115,8 @@ STATE_INFO
 {
     "api_version": 1,
     "cmd":"OTA",
-    "reply": "ERROR",
-    "reply_serial": 4635,
+    "*reply": "ERROR",
+    "*reply_serial": 4635,
     "url":"http://10.42.0.1/files/roadhill.bin"
 }
 ```
@@ -215,19 +215,25 @@ STATE_INFO
 {
     "api_version": 1,
 	"cmd": "PLAY",
-    "reply": "ALL"
-    "reply_serial": 
-	"current_track": "57dc4ec6ddce686cce6460a04bb5cc31",
-    "next_tracks": [
-        "43a5155e9d3772406fb51b9fb3c5e668",
-        "972f619d7f82864a3b11b0e7b37d993e"
+    "*reply": "ERROR",
+    "*reply_serial": 7625,
+    "tracks_url": "http://10.42.0.1/files/album0001",
+    "tracks": [
+        {
+            "name": "43a5155e9d3772406fb51b9fb3c5e668",
+            "size": 12345
+        },
+        {
+        	"name": "972f619d7f82864a3b11b0e7b37d993e",
+            "size": 4321
+        }
     ],
-    "lighting": [
+    "blinks": [
         [10, "code"],
         [100, "another code"],
     ],
     "lighting_time_unit": "sec",
-    "start": "immediate"
+    "*start": "immediate"
 }
 ```
 
@@ -393,7 +399,7 @@ Juggler和Fetcher使用[FreeRTOS Queue](https://www.freertos.org/Embedded-RTOS-Q
 
 ### OTA
 
-### PLAY
+### PLAYwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
 
 
 
