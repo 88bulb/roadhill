@@ -48,6 +48,11 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
                     time: 0,
                     mask: 'ffff',
                     code: '100300000003c680c6f0fa33f0fafa'
+                  },
+                  {
+                    time: 1000,
+                    mask: 'ffff',
+                    code: '100300000003c680c6f0fa33f0fafa'
                   }
                 ],
                 start: 'immediate'

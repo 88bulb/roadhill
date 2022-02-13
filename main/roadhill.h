@@ -2,6 +2,9 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
 #define container_of(ptr, type, member)                                        \
     ({                                                                         \
         const typeof(((type *)0)->member) *__mptr = (ptr);                     \
@@ -37,7 +40,7 @@ typedef struct {
 
 typedef struct {
     int time;
-    uint8_t code[20]; 
+    uint8_t code[40]; 
 } blink_t;
 
 #define URL_BUFFER_SIZE (1024)
@@ -72,5 +75,23 @@ typedef struct {
     const char *path;
     FILE *fp;
     md5_digest_t chunk_digest;
+    blink_t* blinks;
+    int blinks_array_size;
+    int chunk_index;
 } chunk_data_t;
+
+typedef struct {
+    // TODO use pointer
+    char url[URL_BUFFER_SIZE];
+    md5_digest_t digest;
+    int track_size;
+
+    /** fetch gets chunk_data_t out of this queue */
+    int fetch_buffer_size;
+    char *fetch_buffer;
+
+    QueueHandle_t fetch_chunk_in;
+    QueueHandle_t play_chunk_in;
+} fetch_context_t;
+
 
