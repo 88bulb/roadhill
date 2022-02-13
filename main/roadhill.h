@@ -37,8 +37,7 @@ typedef struct {
 
 typedef struct {
     int time;
-    uint16_t mask;
-    uint8_t code[6]; 
+    uint8_t code[20]; 
 } blink_t;
 
 #define URL_BUFFER_SIZE (1024)

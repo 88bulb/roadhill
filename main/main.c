@@ -49,6 +49,8 @@
 
 #define TCP_PORT (6015)
 
+static play_index = -1;
+
 extern esp_err_t esp_vfs_exfat_sdmmc_mount(
     const char *base_path, const sdmmc_host_t *host_config,
     const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
@@ -81,6 +83,34 @@ const char hex_char[16] = "0123456789abcdef";
 #define EB_OTA_REQUESTED ((EventBits_t)(1 << 1))
 static EventGroupHandle_t event_bits;
 
+static esp_err_t unity_open(audio_element_handle_t self) {
+    return ESP_OK;
+}
+
+static int unity_process(audio_element_handle_t self, char *buf, int len) {
+    static uint32_t total = 0;
+
+    if (len == 1024) {
+        int16_t* p = (int16_t*)buf;
+        uint32_t sum = 0;
+        for (int i = 0; i < 512; i++) {
+            sum += p[i] > 0 ? p[i] : (-p[i]);
+        } 
+
+        total += len;
+    }
+
+    int rsize = audio_element_input(self, buf, len);
+    if (rsize <= 0) {
+        return rsize;
+    } else {
+        return audio_element_output(self, buf, rsize);
+    }
+}
+
+static esp_err_t unity_close(audio_element_handle_t self) {
+    return ESP_OK;
+}
 
 static QueueHandle_t http_ota_queue;
 static QueueHandle_t tcp_send_queue;
@@ -300,6 +330,7 @@ static int process_line() {
     } else if (0 == strcmp(cmd, "PLAY")) {
         cmd_type = CMD_PLAY;
 
+        // TODO change to read from queue (allocated by juggler)
         data = malloc(sizeof(play_command_data_t));
         if (data == NULL) {
             err = -1;
@@ -347,21 +378,32 @@ static int process_line() {
             p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
         }
 
-        /*
-                char *tracks =
-                    cJSON_GetObjectItem(root, "track")->valuestring;
-                if (current_track == NULL) {
-                    err = -1;
-                    ESP_LOGI(TAG, "play command has no current_track");
-                    goto finish;
-                }
-                if (!is_valid_track_name(current_track)) {
-                    err = -1;
-                    ESP_LOGI(TAG, "play command current_track invalid");
-                    goto finish;
-                }
-                p->current_track = track_name_to_digest(current_track);
-        */
+        const cJSON *blinks = cJSON_GetObjectItem(root, "blinks");
+        if (!cJSON_IsArray(blinks)) {
+            err = -1;
+            ESP_LOGI(TAG, "blinks is not an array");
+            goto finish;
+        }
+
+        p->blinks_array_size = cJSON_GetArraySize(tracks);
+        p->blinks = (blink_t *)malloc(p->blinks_array_size * sizeof(blink_t));
+        if (p->blinks == NULL) {
+            err = -1;
+            ESP_LOGI(TAG, "failed to allocate memory for blinks");
+            goto finish;
+        }
+
+        for (int i = 0; i < p->blinks_array_size; i++) {
+            cJSON *item = cJSON_GetArrayItem(blinks, i);
+            p->blinks[i].time = cJSON_GetObjectItem(item, "time")->valueint;
+            const char* mask = cJSON_GetObjectItem(item, "mask")->valuestring;
+            const char* code = cJSON_GetObjectItem(item, "code")->valuestring;
+            p->blinks[i].code[0] = mask[0];
+            p->blinks[i].code[1] = mask[1];
+            for (int j = 0; j < 15; j++) {
+                p->blinks[i].code[j + 2] = code[j];
+            }
+        }
 
         message_t msg = {};
         msg.type = MSG_CMD_PLAY;
