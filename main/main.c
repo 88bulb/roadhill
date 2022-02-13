@@ -81,6 +81,7 @@ const char hex_char[16] = "0123456789abcdef";
 #define EB_OTA_REQUESTED ((EventBits_t)(1 << 1))
 static EventGroupHandle_t event_bits;
 
+
 static QueueHandle_t http_ota_queue;
 static QueueHandle_t tcp_send_queue;
 static QueueHandle_t juggler_queue;
@@ -893,20 +894,6 @@ static void juggler(void *arg) {
 
 static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
                              TickType_t wait_time, void *ctx) {
-    /**
-        int read_size = file_marker.end - file_marker.start - file_marker.pos;
-        if (read_size == 0) {
-            return AEL_IO_DONE;
-        } else if (len < read_size) {
-            read_size = len;
-        }
-        memcpy(buf, file_marker.start + file_marker.pos, read_size);
-        file_marker.pos += read_size;
-        return read_size;
-    */
-//    esp_backtrace_print(20);
-//    vTaskDelay(portMAX_DELAY);
-
     static chunk_data_t* chunk = NULL;
     static int chunk_read = 0;
 
@@ -930,7 +917,6 @@ static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
         chunk_read = 0;
         chunk = NULL;
     }
-//    ESP_LOGI("audio", "music read cb, %d bytes read", read);
     return read;
 }
 
