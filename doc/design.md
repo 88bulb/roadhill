@@ -63,12 +63,14 @@ Gateway向服务器报告的信息有两种：
     "type":"DEVICE_INFO",
     "hardware":{
         "codename":"roadhill",
-        "revision":"a0"
+        "revision":"a0",
+        "mac":"98:fa:9b:90:c6:17"
     },
     "firmware":{
         "version":"000100a1",
         "sha256":"babd8e3a91b7c78e549090ad9b9c2b8bf5ab315ae9f96c92ff833715665bb678"
-    }
+    },
+    "*accept_api_version": [1]
 }
 ```
 
@@ -137,13 +139,14 @@ STATE_INFO
 
 ### CONFIG
 
+此命令目前未完成，请忽略本节内容。
+
 `CONFIG`命令设置工作环境。
 
 ```json
 {
     "api_version": 1,
     "cmd": "CONFIG",
-    
     "bulb_firmware": {
         "url": "http://10.42.0.1/files/bulbcast.bin",
         "sha256": "21e831461f432ca453a3b9b97e0870c2807946f559d2574c5d81a571f08755fe"
@@ -209,7 +212,7 @@ STATE_INFO
 
 ### PLAY
 
-
+标注为*的属性目前不支持。
 
 ```json
 {
@@ -229,39 +232,55 @@ STATE_INFO
         }
     ],
     "blinks": [
-        [10, "code"],
-        [100, "another code"],
+        [0, "00ff100300000003c680c6f0fa33f0fafa"],
+        [1000, "00ff100300000003c680c6f0fa33f0fafa"]
     ],
-    "lighting_time_unit": "sec",
     "*start": "immediate"
 }
 ```
 
-#### version
+#### ap_version
 
-命令格式版本。
+命令格式版本，固定为1。
 
-#### current_track
+#### cmd
 
-需要播放的音频文件，该track必须在当前session的tracks列表内，否则视为错误。
+字符串，对PLAY命令，固定为`PLAY`。
 
-#### next_tracks
+#### tracks_url
 
-在当前播放之后，下面最可能播放的音频文件列表，主要目的是给即时下载播放时，提供一个下载的优先级；并不会在track指定的音频文件播放完成后自动播放后续文件。
+字符串，下载地址，需包含`https://`协议前缀，不应有`/`结尾。
 
-数组中的文件都必须在当前session的tracks列表内，否则忽略不存在的track。
+#### tracks
 
-#### lighting
+需要播放的音乐文件列表，其中每个元素包含`name`属性，是文件的MD5，hex格式字符串；包含`size`属性，是文件大小。网关默认给文件加上`.mp3`扩展名，例如上述例子中的`tracks[0]`的下载地址会解释成：
 
-lighting包含时间戳和灯码，但灯码没有仔细推敲模板化的可能，意味着目前仅支持hardcode的bulbcode，但不包含magic，seq num，group id，需具体看一下灯的命令编码格式确定这里有多少byte；可以确定的是字符串是hex格式。
+`http://10.42.0.1/files/album0001/43a5155e9d3772406fb51b9fb3c5e668.mp3`
 
-#### lighting_time_unit
+网关仅会立刻播放`tracks[0]`指定的音乐文件，并且不会在播放停止后自动开始播放下一个音乐文件，云服务器必须再次发送PLAY命令并且把需要播放的音乐文件设为`tracks[0]`。
 
-灯谱的时间单位，当前仅支持秒（`sec`）。
+#### blinks
+
+完整的bulbcode灯码是26字节（52个hex char），例如：
+
+`b01bc0de00a5a5a5a500ff100300000003c680c6f0fa33f0fafa`
+
+PLAY命令中不包含magic（`b01bc0de`，4字节)，sequence number（1字节），Group ID（4字节）。Group ID默认使用网关mac地址的最后四个字节。
+
+blinks数组对象需提供剩下的17字节（34个hex char），包括前面两个字节的bitmask。例如
+
+```json
+[
+    [0, "00ff100300000003c680c6f0fa33f0fafa"],
+    [1000, "0001100300000003c680c6f0fa33f0bebe"]
+]
+```
+
+时间单位固定使用毫秒（msec），不增设属性描述。
 
 #### start
 
-当前支持`immediate`（立即开始播放），和`no`（不播放）。设置为立即开始播放不要求track已经下载完成，网关会尽可能选择尽可能早开始的播放时间。
+当前支持`immediate`（立即开始播放），和`none`（不播放）。设置为立即开始播放不要求track已经下载完成，网关会尽可能选择尽可能早开始的播放时间。
 
 
 
@@ -395,11 +414,11 @@ Juggler和Fetcher使用[FreeRTOS Queue](https://www.freertos.org/Embedded-RTOS-Q
 
 
 
-## Message Data Structure
+## Communication and Message Data Structure
 
-### OTA
 
-### PLAYwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+
+
 
 
 
