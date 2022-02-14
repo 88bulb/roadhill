@@ -21,6 +21,9 @@
 #include "esp_vfs_fat.h"
 #include "esp_rom_md5.h"
 #include "nvs_flash.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_gap_ble_api.h"
 
 #include "esp_debug_helpers.h"
 
@@ -43,6 +46,7 @@ extern esp_err_t esp_vfs_exfat_sdmmc_mount(
 extern void audible(void* arg); 
 
 static const char *TAG = "roadhill";
+// static const char hex_char[] = "0123456789abcdef";
 
 static const char *const chunk_files[] = {
     CHUNK_DIR("0000"), CHUNK_DIR("0001"), CHUNK_DIR("0002"), CHUNK_DIR("0003"),
@@ -81,7 +85,8 @@ static esp_netif_t *ap_netif = NULL;
 static esp_event_handler_instance_t instance_any_wifi_event;
 static esp_event_handler_instance_t instance_any_ip_event;
 
-static wifi_ap_record_t ap_record[20] = {0};
+// static wifi_ap_record_t ap_record[20] = {0};
+static wifi_ap_record_t* ap_record = NULL;
 
 static char test_token[32] = "juwanke-test";
 static char prod_token[32] = "juwanke";
@@ -95,9 +100,9 @@ extern const wifi_config_t sta_config_test_default;
 extern const wifi_config_t sta_config_prod_default;
 extern const wifi_config_t ap_config_default;
 
-static char tx_buf[4096] = {0};
+static char* tx_buf = NULL;
 static int tx_len = 0;
-static char rx_buf[4096] = {0};
+static char* rx_buf = NULL;
 
 #define LINE_LENGTH (256 * 1024)
 
@@ -105,11 +110,13 @@ static char *line;
 static int llen = 0;
 
 static const char rev_token[] = "**";
+static const char mac_token[] = "FF:FF:FF:FF:FF:FF";
 static const char ver_token[] = "00000000";
 static const char sha_token[] = "0000000000000000";
 static const char device_info_tmpl[] =
     "{\"type\":\"DEVICE_INFO\",\"hardware\":{\"codename\":\"roadhill\","
-    "\"revision\":\"**\"},\"firmware\":{\"version\":\"00000000\",\"sha256\":"
+    "\"revision\":\"**\",\"mac_addr\":\"FF:FF:FF:FF:FF:FF\"},\"firmware\":{"
+    "\"version\":\"00000000\",\"sha256\":"
     "\"0000000000000000000000000000000000000000000000000000000000000000\"}}\n";
 
 typedef enum {
@@ -212,6 +219,27 @@ static void prepare_device_info() {
     str = strstr(tx_buf, rev_token);
     str[0] = 'a';
     str[1] = '0';
+
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    str = strstr(tx_buf, mac_token);
+    str[0x00] = hex_char[mac[0] / 16]; 
+    str[0x01] = hex_char[mac[0] % 16];
+    str[0x02] = ':';
+    str[0x03] = hex_char[mac[1] / 16];
+    str[0x04] = hex_char[mac[1] % 16];
+    str[0x05] = ':';
+    str[0x06] = hex_char[mac[2] / 16];
+    str[0x07] = hex_char[mac[2] % 16];
+    str[0x08] = ':';
+    str[0x09] = hex_char[mac[3] / 16];
+    str[0x0a] = hex_char[mac[3] % 16];
+    str[0x0b] = ':';
+    str[0x0c] = hex_char[mac[4] / 16];
+    str[0x0d] = hex_char[mac[4] % 16];
+    str[0x0e] = ':';
+    str[0x0f] = hex_char[mac[5] / 16];
+    str[0x10] = hex_char[mac[5] % 16];
 
     const esp_app_desc_t *app_desc = esp_ota_get_app_description();
     if (is_semver(app_desc->version)) {
@@ -903,6 +931,10 @@ static void juggler(void *arg) {
     }
 }
 
+extern void ble_adv_scan(void *args);
+extern void esp_gap_cb(esp_gap_ble_cb_event_t event,
+    esp_ble_gap_cb_param_t *param); 
+
 void app_main(void) {
     // esp_err_t is typedef-ed int, so it could be used with lwip/sockets
     // api, but the value should be interpretted differently.
@@ -912,17 +944,24 @@ void app_main(void) {
     line = (char *)malloc(LINE_LENGTH);
     memset(line, 0, LINE_LENGTH);
 
+    tx_buf = (char *)malloc(4096);
+    memset(tx_buf, 0, 4096);
+    rx_buf = (char *)malloc(4096);
+    memset(rx_buf, 0, 4096);
+    ap_record = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * 20);
+    memset(ap_record, 0, sizeof(wifi_ap_record_t) * 20);
+
     ota_command_data = (ota_command_data_t *)malloc(sizeof(ota_command_data_t));
 
     event_bits = xEventGroupCreate();
 
     /** this could be created on demand */
     http_ota_queue = xQueueCreate(1, sizeof(message_t));
-    xTaskCreate(http_ota, "http_ota", 32768, NULL, 11, NULL);
+    xTaskCreate(http_ota, "http_ota", 16384, NULL, 11, NULL);
 
     juggler_queue = xQueueCreate(20, sizeof(message_t));
     if (errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY ==
-        xTaskCreate(juggler, "juggler", 32768, NULL, 11, NULL)) {
+        xTaskCreate(juggler, "juggler", 16384, NULL, 11, NULL)) {
         ESP_LOGI(TAG, "failed to create juggler task for memory constraint");
     }
 
@@ -942,6 +981,15 @@ void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
+    ESP_ERROR_CHECK(esp_bluedroid_init());
+    ESP_ERROR_CHECK(esp_bluedroid_enable());
+    ESP_ERROR_CHECK(esp_ble_gap_register_callback(esp_gap_cb));
+
+    xTaskCreate(ble_adv_scan, "ble_adv", 4096, NULL, 16, NULL); 
 
     // init event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());

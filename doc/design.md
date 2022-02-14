@@ -232,8 +232,15 @@ STATE_INFO
         }
     ],
     "blinks": [
-        [0, "00ff100300000003c680c6f0fa33f0fafa"],
-        [1000, "00ff100300000003c680c6f0fa33f0fafa"]
+        {
+            "time": 0,
+            "mask": "00ff",
+            "code": "100300000003c680c6f0fa33f0fafa"
+        },{
+            "time": 1000, 
+            "mask": "00ff",
+            "code": "100300000003c680c6f0fa33f0fafa"
+        }
     ],
     "*start": "immediate"
 }
@@ -267,14 +274,7 @@ STATE_INFO
 
 PLAY命令中不包含magic（`b01bc0de`，4字节)，sequence number（1字节），Group ID（4字节）。Group ID默认使用网关mac地址的最后四个字节。
 
-blinks数组对象需提供剩下的17字节（34个hex char），包括前面两个字节的bitmask。例如
-
-```json
-[
-    [0, "00ff100300000003c680c6f0fa33f0fafa"],
-    [1000, "0001100300000003c680c6f0fa33f0bebe"]
-]
-```
+blinks数组对象需提供剩下的17字节（34个hex char），包括前面2个字节的`mask`，和剩余15字节的`code`，如例子所示。
 
 时间单位固定使用毫秒（msec），不增设属性描述。
 
@@ -418,11 +418,11 @@ Juggler和Fetcher使用[FreeRTOS Queue](https://www.freertos.org/Embedded-RTOS-Q
 
 
 
+## Audible
 
 
 
-
-
+Audible是一个drain模式；播放开始于
 
 
 

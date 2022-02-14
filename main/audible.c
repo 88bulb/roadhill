@@ -26,6 +26,7 @@ const char *TAG = "audible";
 extern QueueHandle_t tcp_send_queue;
 extern QueueHandle_t juggler_queue;
 extern QueueHandle_t audible_queue;
+extern QueueHandle_t ble_queue;
 
 extern int play_index;
 
@@ -67,14 +68,15 @@ static esp_err_t unity_close(audio_element_handle_t self) {
 }
 */
 
+extern QueueHandle_t ble_queue; 
+
 static void timer_cb(void* arg) {
-
-    ESP_LOGI(TAG, "timer cb fired");
-
     if (blink_next < blinks_array_size) {
-        if (esp_timer_get_time() - blink_start > blinks[blink_next].time) {
-            blinks[blink_next].code[17] = 0;
-            ESP_LOGI(TAG, "blink: %s", (char*)blinks[blink_next].code);
+        if (esp_timer_get_time() - blink_start >
+            blinks[blink_next].time * 1000) {
+            xQueueSend(ble_queue, &blinks[blink_next].code[0], 0);
+            blinks[blink_next].code[34] = 0;
+            ESP_LOGI(TAG, "blink: %s", (char *)blinks[blink_next].code);
             blink_next++;
         }
     } else {
@@ -101,11 +103,9 @@ static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
 
                 ESP_LOGI(TAG, "blinks array size: %d", blinks_array_size);
 
-                esp_timer_start_periodic(blink_timer, 1000000);
+                esp_timer_start_periodic(blink_timer, 100000);
                 blink_start = esp_timer_get_time();
                 blink_next = 0;
-//                 timer_cb(NULL);
-
             } else {
                 blinks_array_size = 0;
                 blinks = NULL;
