@@ -45,7 +45,7 @@ extern esp_err_t esp_vfs_exfat_sdmmc_mount(
     const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
     sdmmc_card_t **out_card);
 
-extern void audible(void* arg); 
+extern void audible(void *arg);
 
 static const char *TAG = "roadhill";
 const char hex_char[16] = "0123456789abcdef";
@@ -60,6 +60,8 @@ QueueHandle_t tcp_send_queue;
 QueueHandle_t juggler_queue;
 QueueHandle_t audible_queue;
 
+static QueueHandle_t play_context_queue;
+
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
 
@@ -67,7 +69,7 @@ static esp_event_handler_instance_t instance_any_wifi_event;
 static esp_event_handler_instance_t instance_any_ip_event;
 
 // static wifi_ap_record_t ap_record[20] = {0};
-static wifi_ap_record_t* ap_record = NULL;
+static wifi_ap_record_t *ap_record = NULL;
 
 static char test_token[32] = "juwanke-test";
 static char prod_token[32] = "juwanke";
@@ -81,9 +83,9 @@ extern const wifi_config_t sta_config_test_default;
 extern const wifi_config_t sta_config_prod_default;
 extern const wifi_config_t ap_config_default;
 
-static char* tx_buf = NULL;
+static char *tx_buf = NULL;
 static int tx_len = 0;
-static char* rx_buf = NULL;
+static char *rx_buf = NULL;
 
 #define LINE_LENGTH (256 * 1024)
 
@@ -133,10 +135,28 @@ static bool is_semver(const char *str) {
     return true;
 }
 
-bool is_valid_track_name(char *name) {
-    if (strlen(name) != 36)
+bool is_hex_string(const char *str, int len) {
+    if (len == 0) {
+        return true;
+    }
+
+    if (len > 0) {
+        if (strlen(str) != len)
+            return false;
+    }
+
+    for (int i = 0; i < strlen(str); i++) {
+        if (str[i] >= '0' && str[i] <= '9')
+            continue;
+        if (str[i] >= 'a' && str[i] <= 'f')
+            continue;
         return false;
-    if (0 != strcmp(&name[32], ".mp3"))
+    }
+    return true;
+}
+
+bool is_valid_md5_hex_string(const char *name) {
+    if (strlen(name) < 32)
         return false;
     for (int i = 0; i < 32; i++) {
         if (name[i] >= '0' && name[i] <= '9')
@@ -204,7 +224,7 @@ static void prepare_device_info() {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     str = strstr(tx_buf, mac_token);
-    str[0x00] = hex_char[mac[0] / 16]; 
+    str[0x00] = hex_char[mac[0] / 16];
     str[0x01] = hex_char[mac[0] % 16];
     str[0x02] = ':';
     str[0x03] = hex_char[mac[1] / 16];
@@ -294,18 +314,16 @@ static int process_line() {
 
         data = NULL;
         ESP_LOGI(TAG, "ota request queued, url: %s", url);
-    } else if (0 == strcmp(cmd, "PLAY")) {
-        cmd_type = CMD_PLAY;
 
-        // TODO change to read from queue (allocated by juggler)
-        data = malloc(sizeof(play_command_data_t));
-        if (data == NULL) {
+    } else if (0 == strcmp(cmd, "PLAY")) {
+        int tracks_array_size = 0;
+        int blinks_array_size = 0;
+
+        if (uxQueueMessagesWaiting(play_context_queue) == 0) {
             err = -1;
-            ESP_LOGI(TAG, "no memory");
+            ESP_LOGI(TAG, "no available context to construct a play operation");
             goto finish;
         }
-
-        play_command_data_t *p = (play_command_data_t *)data;
 
         char *tracks_url = cJSON_GetObjectItem(root, "tracks_url")->valuestring;
         if (tracks_url == NULL) {
@@ -320,8 +338,6 @@ static int process_line() {
             goto finish;
         }
 
-        strcpy(p->tracks_url, tracks_url);
-
         const cJSON *tracks = cJSON_GetObjectItem(root, "tracks");
         if (!cJSON_IsArray(tracks)) {
             err = -1;
@@ -329,15 +345,110 @@ static int process_line() {
             goto finish;
         }
 
-        p->tracks_array_size = cJSON_GetArraySize(tracks);
-        p->tracks = (track_t *)malloc(p->tracks_array_size * sizeof(track_t));
-        if (p->tracks == NULL) {
+        tracks_array_size = cJSON_GetArraySize(tracks);
+
+        for (int i = 0; i < tracks_array_size; i++) {
+            cJSON *item = cJSON_GetArrayItem(tracks, i);
+
+            cJSON *name = cJSON_GetObjectItem(item, "name");
+            if (!cJSON_IsString(name)) {
+                err = -1;
+                ESP_LOGI(TAG, "track[%d] name is not a string", i);
+                goto finish;
+            }
+
+            char *name_str = name->valuestring;
+            if (!is_valid_md5_hex_string(name_str)) {
+                err = -1;
+                ESP_LOGI(TAG, "track[%d] name '%s' is not a md5 hex string", i,
+                         name_str);
+                goto finish;
+            }
+
+            cJSON *size = cJSON_GetObjectItem(item, "size");
+            if (!cJSON_IsNumber(size)) {
+                err = -1;
+                ESP_LOGI(TAG, "track[%d] size is not a number", i);
+                goto finish;
+            }
+        }
+
+        cJSON *blinks = cJSON_GetObjectItem(root, "blinks");
+        if (!cJSON_IsArray(blinks)) {
             err = -1;
-            ESP_LOGI(TAG, "failed to allocate memory for tracks");
+            ESP_LOGI(TAG, "blinks is not an array");
             goto finish;
         }
 
-        // TODO validation
+        blinks_array_size = cJSON_GetArraySize(blinks);
+        for (int i = 0; i < blinks_array_size; i++) {
+            cJSON *item = cJSON_GetArrayItem(blinks, i);
+
+            cJSON *time = cJSON_GetObjectItem(item, "time");
+            if (!cJSON_IsNumber(time)) {
+                err = -1;
+                ESP_LOGI(TAG, "blink[%d] time is not a number", i);
+                goto finish;
+            }
+
+            cJSON *mask = cJSON_GetObjectItem(item, "mask");
+            if (!cJSON_IsString(mask)) {
+                err = -1;
+                ESP_LOGI(TAG, "blink[%d] mask is not a string", i);
+                goto finish;
+            }
+
+            char *mask_str = mask->valuestring;
+            if (!is_hex_string(mask_str, 4)) {
+                err = -1;
+                ESP_LOGI(TAG, "blink[%d] maks is not a valid hex string", i);
+                goto finish;
+            }
+
+            cJSON *code = cJSON_GetObjectItem(item, "code");
+            if (!cJSON_IsString(code)) {
+                err = -1;
+                ESP_LOGI(TAG, "blink[%d] code is not a string", i);
+                goto finish;
+            }
+
+            char *code_str = code->valuestring;
+            if (!is_hex_string(code_str, 30)) {
+                err = -1;
+                ESP_LOGI(TAG, "blink[%d] code is not a valid hex string", i);
+                goto finish;
+            }
+        }
+
+        track_t *_tracks = NULL;
+        if (tracks_array_size) {
+            _tracks = (track_t *)malloc(tracks_array_size * sizeof(track_t));
+
+            if (_tracks == NULL) {
+                err = -1;
+                ESP_LOGI(TAG, "failed to allocate memory for tracks");
+                goto finish;
+            }
+        }
+
+        blink_t *_blinks = NULL;
+        if (blinks_array_size) {
+            _blinks = (blink_t *)malloc(blinks_array_size * sizeof(blink_t));
+            if (_blinks == NULL) {
+                free(_tracks);
+                err = -1;
+                ESP_LOGI(TAG, "failed to allocate memory for blinks");
+                goto finish;
+            }
+        }
+
+        memset(p, 0, sizeof(play_context_t));
+        strcpy(p->tracks_url, tracks_url);
+        p->tracks_array_size = tracks_array_size;
+        p->tracks = _tracks;
+        p->blinks_array_size = blinks_array_size;
+        p->blinks = _blinks;
+
         for (int i = 0; i < p->tracks_array_size; i++) {
             cJSON *item = cJSON_GetArrayItem(tracks, i);
             p->tracks[i].digest = track_name_to_digest(
@@ -345,45 +456,29 @@ static int process_line() {
             p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
         }
 
-        const cJSON *blinks = cJSON_GetObjectItem(root, "blinks");
-        if (!cJSON_IsArray(blinks)) {
-            err = -1;
-            ESP_LOGI(TAG, "blinks is not an array");
-            goto finish;
-        }
-
-        p->blinks_array_size = cJSON_GetArraySize(blinks);
-        p->blinks = (blink_t *)malloc(p->blinks_array_size * sizeof(blink_t));
-        if (p->blinks == NULL) {
-            err = -1;
-            ESP_LOGI(TAG, "failed to allocate memory for blinks");
-            goto finish;
-        }
-
         for (int i = 0; i < p->blinks_array_size; i++) {
             cJSON *item = cJSON_GetArrayItem(blinks, i);
+
             p->blinks[i].time = cJSON_GetObjectItem(item, "time")->valueint;
-            const char* mask = cJSON_GetObjectItem(item, "mask")->valuestring;
-            const char* code = cJSON_GetObjectItem(item, "code")->valuestring;
-            p->blinks[i].code[0] = mask[0];
-            p->blinks[i].code[1] = mask[1];
-            p->blinks[i].code[2] = mask[2];
-            p->blinks[i].code[3] = mask[3];
+            const char *mask = cJSON_GetObjectItem(item, "mask")->valuestring;
+            for (int j = 0; j < 4; j++) {
+                p->blinks[i].code[j] = mask[j];
+            }
+
+            const char *code = cJSON_GetObjectItem(item, "code")->valuestring;
             for (int j = 0; j < 30; j++) {
                 p->blinks[i].code[j + 4] = code[j];
             }
         }
 
-        message_t msg = {};
-        msg.type = MSG_CMD_PLAY;
-        msg.data = p;
+        message_t msg = {.type = MSG_CMD_PLAY, .value = {.play_context = p}};
         if (pdTRUE != xQueueSend(juggler_queue, &msg, 0)) {
             err = -1;
+            // free many things but be sure to recycle play_context!
             ESP_LOGI(TAG, "failed to enqueue play request");
             goto finish;
         }
 
-        data = NULL;
         ESP_LOGI(TAG, "play request enqueued");
     }
 
@@ -640,9 +735,9 @@ static void fetcher(void *arg) {
     int total_read_len = 0, read_len;
     while (1) {
         message_t msg;
-        xQueueReceive(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+        xQueueReceive(ctx->input, &msg, portMAX_DELAY);
         if (msg.type == MSG_FETCH_ABORT) {
-            message_t msg = { .type = MSG_FETCH_ABORTED, .from = ctx };
+            message_t msg = {.type = MSG_FETCH_ABORTED, .from = ctx};
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             ESP_LOGI(TAG, "fetch aborted");
@@ -651,19 +746,14 @@ static void fetcher(void *arg) {
             return;
         }
 
-        if (msg.type != MSG_FETCH_MORE) {
-            ESP_LOGI(TAG, "message type: %d", msg.type);
-        }
-
         assert(msg.type == MSG_FETCH_MORE);
         assert(msg.value.mem_block.data);
 
-        // msg.type supposed to be MSG_FETCH_MORE
-        char* data = msg.value.mem_block.data;
+        char *data = msg.value.mem_block.data;
         read_len = esp_http_client_read(client, data, MEM_BLOCK_SIZE);
         total_read_len += read_len;
         if (read_len > 0) {
-            if (total_read_len > ctx-> track_size) {
+            if (total_read_len > ctx->track_size) {
                 // TODO oversize error
             } else if (total_read_len == ctx->track_size) {
                 message_t reply = {0};
@@ -691,7 +781,7 @@ static void fetcher(void *arg) {
                 xQueueSend(juggler_queue, &reply, portMAX_DELAY);
             }
         } else if (read_len == 0) {
-            message_t reply = { .type = MSG_FETCH_FINISH, .from = ctx };
+            message_t reply = {.type = MSG_FETCH_FINISH, .from = ctx};
             reply.value.mem_block.length = 0;
             reply.value.mem_block.data = data; // don't forget this
             xQueueSend(juggler_queue, &reply, portMAX_DELAY);
@@ -760,7 +850,6 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
     }
 }
 
-
 static FRESULT prepare_chunk_file(const char *vfs_path) {
     FRESULT fr;
     FILINFO fno;
@@ -798,7 +887,7 @@ static void juggler(void *arg) {
     const char *TAG = "juggler";
     esp_err_t err;
     message_t msg;
-   
+
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
         .max_files = 64,
@@ -841,7 +930,7 @@ static void juggler(void *arg) {
                  esp_err_to_name(err));
     }
 
-    fetch_context_t* free_fetch_contexts[2] = {0};
+    fetch_context_t *free_fetch_contexts[2] = {0};
     for (int i = 0; i < 2; i++) {
         free_fetch_contexts[i] =
             (fetch_context_t *)malloc(sizeof(fetch_context_t));
@@ -849,16 +938,15 @@ static void juggler(void *arg) {
     }
     int free_fetch_ctx_count = 2;
 
-    char* free_mem_blocks[8] = {0};
+    char *free_mem_blocks[8] = {0};
     for (int i = 0; i < 8; i++) {
-        free_mem_blocks[i] = (char*)malloc(MEM_BLOCK_SIZE);
+        free_mem_blocks[i] = (char *)malloc(MEM_BLOCK_SIZE);
         assert(free_mem_blocks[i]);
     }
     int free_mem_block_count = 8;
 
     for (int i = 0; i < 2; i++) {
-        free_fetch_contexts[i]->fetch_chunk_in =
-            xQueueCreate(16, sizeof(message_t));
+        free_fetch_contexts[i]->input = xQueueCreate(16, sizeof(message_t));
     }
 
     FILE *fp;
@@ -874,21 +962,23 @@ static void juggler(void *arg) {
         ESP_LOGI(TAG, "failed to open (r+) temp file (%d)", errno);
     }
 
-    // TODO  
+    // TODO
     fseek(fp, 0L, SEEK_SET);
 
     int file_written = 0;
     int file_read = 0;
     int file_size = 0;
 
-    fetch_context_t* playing_fetch_context = NULL;
+    play_context_t *play_context = NULL;
+    fetch_context_t *primary_fetch_context = NULL;
+    fetch_context_t *seconary_fetch_context = NULL;
 
     while (xQueueReceive(juggler_queue, &msg, portMAX_DELAY)) {
         switch (msg.type) {
         case MSG_CMD_PLAY: {
             ESP_LOGI(TAG, "play request received");
 
-            play_command_data_t *data = msg.data;
+            play_context = msg.value.play_context;
 
             // prepare context for new play
             // TODO grasp fetch_context from queue
@@ -896,14 +986,14 @@ static void juggler(void *arg) {
                 // TODO
                 ESP_LOGI(TAG, "no free context or mem blocks");
             } else {
-                fetch_context_t *ctx = 
+                fetch_context_t *ctx =
                     free_fetch_contexts[free_fetch_ctx_count - 1];
 
                 // TODO reduce mem
-                strlcpy(ctx->url, data->tracks_url, 1024);
-                ctx->digest = data->tracks[0].digest;
+                strlcpy(ctx->url, play_context->tracks_url, 1024);
+                ctx->digest = play_context->tracks[0].digest;
                 track_url_strlcat(ctx->url, ctx->digest, 1024);
-                ctx->track_size = data->tracks[0].size;
+                ctx->track_size = play_context->tracks[0].size;
                 ctx->play_started = false;
 
                 if (pdPASS !=
@@ -912,54 +1002,53 @@ static void juggler(void *arg) {
                     ESP_LOGI(TAG, "failed to start fetcher");
                 }
 
-                playing_fetch_context = ctx;
-
-                message_t msg = {.type = MSG_FETCH_MORE };
+                message_t msg = {.type = MSG_FETCH_MORE};
                 msg.value.mem_block.data =
                     free_mem_blocks[free_mem_block_count - 1];
                 free_mem_block_count--;
-                xQueueSend(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+                xQueueSend(ctx->input, &msg, portMAX_DELAY);
 
                 msg.value.mem_block.data =
                     free_mem_blocks[free_mem_block_count - 1];
                 free_mem_block_count--;
 
-                xQueueSend(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+                xQueueSend(ctx->input, &msg, portMAX_DELAY);
                 // where to retrieve mem_block? and how much?
 
                 file_size = ctx->track_size;
                 file_read = 0;
                 file_written = 0;
-
             }
         } break;
 
         case MSG_FETCH_MORE_DATA: {
-            char* data = msg.value.mem_block.data;
+            char *data = msg.value.mem_block.data;
             int length = msg.value.mem_block.length;
-            fetch_context_t* ctx = msg.from;
+            fetch_context_t *ctx = msg.from;
 
             // TODO error
             fwrite(data, sizeof(char), length, fp);
             fflush(fp);
             file_written += msg.value.mem_block.length;
-            
+
             if (ctx->play_started == false) {
                 ctx->play_started = true;
                 msg.type = MSG_AUDIO_DATA;
                 msg.from = NULL;
+
                 xQueueSend(audible_queue, &msg, portMAX_DELAY);
+
                 file_read += length;
             } else {
                 msg.type = MSG_FETCH_MORE;
-                xQueueSend(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+                xQueueSend(ctx->input, &msg, portMAX_DELAY);
             }
         } break;
 
         case MSG_FETCH_FINISH: {
-            char* data = msg.value.mem_block.data;
+            char *data = msg.value.mem_block.data;
             int length = msg.value.mem_block.length;
-            fetch_context_t* ctx = msg.from;
+            fetch_context_t *ctx = msg.from;
 
             if (length > 0) {
                 // TODO error
@@ -987,21 +1076,22 @@ static void juggler(void *arg) {
 
                 fseek(fp, file_read, SEEK_SET);
                 int to_read = file_written - file_read;
-                if (to_read > MEM_BLOCK_SIZE) to_read = MEM_BLOCK_SIZE;
+                if (to_read > MEM_BLOCK_SIZE)
+                    to_read = MEM_BLOCK_SIZE;
 
                 char *data = msg.value.mem_block.data;
                 int length = fread(data, sizeof(char), to_read, fp);
                 file_read += length;
 
                 fseek(fp, file_written, SEEK_SET);
-                
+
                 msg.type = MSG_AUDIO_DATA;
-                msg.from = NULL;  
+                msg.from = NULL;
                 msg.value.mem_block.length = length;
 
                 xQueueSend(audible_queue, &msg, portMAX_DELAY);
             } else {
-                // starving !!! TODO 
+                // starving !!! TODO
                 // it seems that we need a way to record fetch context related
                 // to current play.
                 // playing_fetch_context->
@@ -1017,7 +1107,7 @@ static void juggler(void *arg) {
 
 extern void ble_adv_scan(void *args);
 extern void esp_gap_cb(esp_gap_ble_cb_event_t event,
-    esp_ble_gap_cb_param_t *param); 
+                       esp_ble_gap_cb_param_t *param);
 
 void app_main(void) {
     // esp_err_t is typedef-ed int, so it could be used with lwip/sockets
@@ -1032,29 +1122,34 @@ void app_main(void) {
     memset(tx_buf, 0, 4096);
     rx_buf = (char *)malloc(4096);
     memset(rx_buf, 0, 4096);
-    ap_record = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * 20);
+    ap_record = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * 20);
     memset(ap_record, 0, sizeof(wifi_ap_record_t) * 20);
-
     ota_command_data = (ota_command_data_t *)malloc(sizeof(ota_command_data_t));
 
     event_bits = xEventGroupCreate();
 
+    play_context_queue = xQueueCreate(2, sizeof(play_context_t *));
+    for (int i = 0; i < 2; i++) {
+        play_context_t *p = (play_context_t *)malloc(sizeof(play_context_t));
+        memset(p, 0, sizeof(play_context_t));
+        xQueueSend(play_context_queue, &p, portMAX_DELAY);
+    }
+
     /** this could be created on demand */
     http_ota_queue = xQueueCreate(1, sizeof(message_t));
+    tcp_send_queue = xQueueCreate(8, sizeof(message_t));
+    audible_queue = xQueueCreate(8, sizeof(message_t));
+    juggler_queue = xQueueCreate(8, sizeof(message_t));
+
     xTaskCreate(http_ota, "http_ota", 16384, NULL, 11, NULL);
 
-    juggler_queue = xQueueCreate(20, sizeof(message_t));
     if (errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY ==
         xTaskCreate(juggler, "juggler", 16384, NULL, 11, NULL)) {
         ESP_LOGI(TAG, "failed to create juggler task for memory constraint");
     }
 
-    tcp_send_queue = xQueueCreate(20, sizeof(message_t));
     xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
-
     xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
-    
-    audible_queue = xQueueCreate(8, sizeof(message_t));
     xTaskCreatePinnedToCore(audible, "audible", 4096, NULL, 18, NULL, 1);
 
     // init nvs
@@ -1073,7 +1168,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_bluedroid_enable());
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(esp_gap_cb));
 
-    xTaskCreate(ble_adv_scan, "ble_adv", 4096, NULL, 16, NULL); 
+    xTaskCreate(ble_adv_scan, "ble_adv", 4096, NULL, 16, NULL);
 
     // init event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());

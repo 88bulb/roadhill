@@ -46,7 +46,7 @@ static int unity_process(audio_element_handle_t self, char *buf, int len) {
         uint32_t sum = 0;
         for (int i = 0; i < 512; i++) {
             sum += p[i] > 0 ? p[i] : (-p[i]);
-        } 
+        }
 
         total += len;
     }
@@ -64,65 +64,19 @@ static esp_err_t unity_close(audio_element_handle_t self) {
 }
 */
 
-/*
-static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
-                             TickType_t wait_time, void *ctx) {
-    static chunk_data_t* chunk = NULL;
-    static int chunk_read = 0;
-
-    if (chunk == NULL) {
-        xQueueReceive(audible_queue, &chunk, wait_time); 
-        ESP_LOGI(TAG, "chunk index: %d", chunk->chunk_index);
-        if (chunk->chunk_index == 0) {
-            if (chunk->blinks_array_size > 0) {
-                blinks_array_size = chunk->blinks_array_size;
-                blinks = chunk->blinks;
-
-                ESP_LOGI(TAG, "blinks array size: %d", blinks_array_size);
-
-                esp_timer_start_periodic(blink_timer, 100000);
-                blink_start = esp_timer_get_time();
-                blink_next = 0;
-            } else {
-                blinks_array_size = 0;
-                blinks = NULL;
-                blink_next = -1;
-            }
-        }
-        chunk_read = 0;
-        fseek(chunk->fp, 0L, SEEK_SET);
-    }
-
-    int chunk_size = chunk->metadata.chunk_size;
-    int chunk_left = chunk_size - chunk_read; 
-    int reading = (len <= chunk_left) ? len : chunk_left;
-    int read = fread(buf, 1, reading, chunk->fp);
-    chunk_read += read;
-    if (chunk_read == chunk_size) {
-        message_t msg;
-        msg.type = MSG_CHUNK_PLAYED;
-        msg.data = chunk;
-        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-        chunk_read = 0;
-        chunk = NULL;
-    }
-    return read;
-}
-*/
-
-static char* data = NULL;
+static char *data = NULL;
 static int data_length = 0;
 static int data_played = 0;
 
 static blink_t *blinks = NULL;
-static int blinks_array_size = 0; 
+static int blinks_array_size = 0;
 
 static int blink_next = -1;
 static int64_t blink_start = -1;
 
 static esp_timer_handle_t blink_timer;
 
-extern QueueHandle_t ble_queue; 
+extern QueueHandle_t ble_queue;
 
 static void blink_done() {
     if (blinks_array_size) {
@@ -138,7 +92,7 @@ static void blink_done() {
     }
 }
 
-static void timer_cb(void* arg) {
+static void timer_cb(void *arg) {
     if (blink_next < blinks_array_size) {
         if (esp_timer_get_time() - blink_start >
             blinks[blink_next].time * 1000) {
@@ -148,7 +102,6 @@ static void timer_cb(void* arg) {
             blink_next++;
         }
     } else {
-        
 
         // xQueueSend
     }
@@ -182,8 +135,7 @@ top:
             data = NULL;
             data_length = 0;
             data_played = 0;
-
-            // no need to further "optimize", there is buffer. 
+            // no need to further "optimize", there is buffer.
         }
         return len;
     }
@@ -286,14 +238,14 @@ void audible(void *arg) {
     ESP_LOGI(TAG, "[3.1] Initialize keys on board");
 
     audio_board_key_init(set);
-/**
-    periph_button_cfg_t btn_cfg = {
-        .gpio_mask = (1ULL << get_input_rec_id()) |
-                     (1ULL << get_input_mode_id()), // REC BTN & MODE BTN
-    };
-    esp_periph_handle_t button_handle = periph_button_init(&btn_cfg);
-    esp_periph_start(set, button_handle);
-*/
+    /**
+        periph_button_cfg_t btn_cfg = {
+            .gpio_mask = (1ULL << get_input_rec_id()) |
+                         (1ULL << get_input_mode_id()), // REC BTN & MODE BTN
+        };
+        esp_periph_handle_t button_handle = periph_button_init(&btn_cfg);
+        esp_periph_start(set, button_handle);
+    */
 
     ESP_LOGI(TAG, "[ 4 ] Set up  event listener");
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
@@ -400,4 +352,3 @@ void audible(void *arg) {
         }
     }
 }
-
