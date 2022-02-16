@@ -32,11 +32,13 @@
 #define CHUNK_DIR(x) "/emmc/00/" x
 #define CHUNK_FILE_SIZE (1024 * 1024)
 
+#define TEMP_FILE_PATH "/emmc/temp"
+
+#define MEM_BLOCK_SIZE (32768)
+
 #include "roadhill.h"
 
 #define TCP_PORT (6015)
-
-int play_index = -1; 
 
 extern esp_err_t esp_vfs_exfat_sdmmc_mount(
     const char *base_path, const sdmmc_host_t *host_config,
@@ -46,27 +48,6 @@ extern esp_err_t esp_vfs_exfat_sdmmc_mount(
 extern void audible(void* arg); 
 
 static const char *TAG = "roadhill";
-// static const char hex_char[] = "0123456789abcdef";
-
-static const char *const chunk_files[] = {
-    CHUNK_DIR("0000"), CHUNK_DIR("0001"), CHUNK_DIR("0002"), CHUNK_DIR("0003"),
-    CHUNK_DIR("0004"), CHUNK_DIR("0005"), CHUNK_DIR("0006"), CHUNK_DIR("0007"),
-    CHUNK_DIR("0008"), CHUNK_DIR("0009"), CHUNK_DIR("0010"), CHUNK_DIR("0011"),
-    CHUNK_DIR("0012"), CHUNK_DIR("0013"), CHUNK_DIR("0014"), CHUNK_DIR("0015"),
-    CHUNK_DIR("0016"), CHUNK_DIR("0017"), CHUNK_DIR("0018"), CHUNK_DIR("0019"),
-    CHUNK_DIR("0020"), CHUNK_DIR("0021"), CHUNK_DIR("0022"), CHUNK_DIR("0023"),
-    CHUNK_DIR("0024"), CHUNK_DIR("0025"), CHUNK_DIR("0026"), CHUNK_DIR("0027"),
-    CHUNK_DIR("0028"), CHUNK_DIR("0029"), CHUNK_DIR("0030"), CHUNK_DIR("0031"),
-    CHUNK_DIR("0032"), CHUNK_DIR("0033"), CHUNK_DIR("0034"), CHUNK_DIR("0035"),
-    CHUNK_DIR("0036"), CHUNK_DIR("0037"), CHUNK_DIR("0038"), CHUNK_DIR("0039"),
-    CHUNK_DIR("0040"), CHUNK_DIR("0041"), CHUNK_DIR("0042"), CHUNK_DIR("0043"),
-    CHUNK_DIR("0044"), CHUNK_DIR("0045"), CHUNK_DIR("0046"), CHUNK_DIR("0047"),
-    CHUNK_DIR("0048"), CHUNK_DIR("0049"), CHUNK_DIR("0050"), CHUNK_DIR("0051"),
-    CHUNK_DIR("0052"), CHUNK_DIR("0053"), CHUNK_DIR("0054"), CHUNK_DIR("0055"),
-    CHUNK_DIR("0056"), CHUNK_DIR("0057"), CHUNK_DIR("0058"), CHUNK_DIR("0059"),
-    CHUNK_DIR("0060"), CHUNK_DIR("0061"), CHUNK_DIR("0062"), CHUNK_DIR("0063"),
-};
-
 const char hex_char[16] = "0123456789abcdef";
 
 #define EB_STA_GOT_IP ((EventBits_t)(1 << 0))
@@ -612,7 +593,7 @@ static void fetcher(void *arg) {
     fetch_context_t *ctx = (fetch_context_t *)arg;
     esp_err_t err;
 
-    ESP_LOGI(TAG, "fetch: %s", ctx->url);
+    ESP_LOGI(TAG, "fetching: %s", ctx->url);
 
     esp_http_client_config_t config = {
         .url = ctx->url,
@@ -620,90 +601,109 @@ static void fetcher(void *arg) {
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if ((err = esp_http_client_open(client, 0)) != ESP_OK) {
-        // TODO
+        ESP_LOGI(TAG, "fetch error, failed to open http client (%d, %s)", err,
+                 esp_err_to_name(err));
+
+        message_t msg = {.type = MSG_FETCH_ERROR,
+                         .from = ctx,
+                         .value = {.fetch_error = {.err = err, .data = NULL}}};
+        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+        vTaskDelete(NULL);
+        return;
     }
 
     int content_length = esp_http_client_fetch_headers(client);
     // ULLONG_MAX in limits.h
     if (content_length == -1) {
+        ESP_LOGI(TAG, "server does not respond content-length in header");
         content_length = ctx->track_size;
     } else if (content_length != ctx->track_size) {
-        // TODO
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+
+        ESP_LOGI(TAG, "fetch error, size mismatch, expected: %d, actual: %d",
+                 ctx->track_size, content_length);
+
+        message_t msg = {
+            .type = MSG_FETCH_ERROR,
+            .from = ctx,
+            .value = {.fetch_error = {.err = 0xF001, // define ERROR in header
+                                      .data = NULL}}};
+        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+        vTaskDelete(NULL);
+        return;
+    } else {
+        ESP_LOGI(TAG, "server responds a content-length of %d bytes",
+                 content_length);
     }
 
-    chunk_data_t* chunk = NULL;
     int total_read_len = 0, read_len;
-    int total_chunks = 0, chunk_written = 0;
     while (1) {
-        read_len = esp_http_client_read(client, ctx->fetch_buffer,
-                                        ctx->fetch_buffer_size);
-
-        if (read_len > 0) {
-            if (chunk == NULL) {
-                // TODO handle error
-                xQueueReceive(ctx->fetch_chunk_in, &chunk, portMAX_DELAY); 
-
-                if (!chunk) {
-                    ESP_LOGI(TAG, "!!!! chunk is NULL");
-                }
-
-                if (!chunk->fp) {
-                    ESP_LOGI(TAG, "!!! chunk-fp is NULL");
-                }
-
-                fseek(chunk->fp, 0L, SEEK_SET);
-                chunk_written = 0;
-            }
-
-            int writing, left;
-            if (chunk_written + read_len <= CHUNK_FILE_SIZE) {
-                writing = read_len;
-                left = 0;
-            } else {
-                writing = CHUNK_FILE_SIZE - chunk_written;
-                left = read_len - writing;
-            } 
-
-            // TODO assuming all written 
-            int written = fwrite(ctx->fetch_buffer, 1, writing, chunk->fp);
-            if (written < writing) {
-                ESP_LOGE(TAG, "writing %d bytes, written %d bytes", writing,
-                         written);
-            }
-
-            chunk_written += writing;
-
-            if (chunk_written == CHUNK_FILE_SIZE) {
-                chunk->metadata.chunk_index = total_chunks++;
-                chunk->metadata.chunk_size = chunk_written;
-
-                message_t msg;
-                msg.type = MSG_CHUNK_FETCHED;
-                msg.data = chunk;
-
-                xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-
-                xQueueReceive(ctx->fetch_chunk_in, &chunk, portMAX_DELAY);
-                chunk_written = 0;                
-                fseek(chunk->fp, 0L, SEEK_SET);                
-                if (left > 0) {
-                    fwrite(&(ctx->fetch_buffer[writing]), 1, left, chunk->fp);
-                    chunk_written += left;
-                }                 
-            }
-
-            total_read_len += read_len;
-        } else if (read_len == 0) {
-            chunk->metadata.chunk_index = total_chunks++;
-            chunk->metadata.chunk_size = chunk_written;
-
-            message_t msg;
-            msg.type = MSG_CHUNK_FETCHED;
-            msg.data = chunk;
-
+        message_t msg;
+        xQueueReceive(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+        if (msg.type == MSG_FETCH_ABORT) {
+            message_t msg = { .type = MSG_FETCH_ABORTED, .from = ctx };
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            ESP_LOGI(TAG, "fetch aborted");
             xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-            break;
+            vTaskDelete(NULL);
+            return;
+        }
+
+        if (msg.type != MSG_FETCH_MORE) {
+            ESP_LOGI(TAG, "message type: %d", msg.type);
+        }
+
+        assert(msg.type == MSG_FETCH_MORE);
+        assert(msg.value.mem_block.data);
+
+        // msg.type supposed to be MSG_FETCH_MORE
+        char* data = msg.value.mem_block.data;
+        read_len = esp_http_client_read(client, data, MEM_BLOCK_SIZE);
+        total_read_len += read_len;
+        if (read_len > 0) {
+            if (total_read_len > ctx-> track_size) {
+                // TODO oversize error
+            } else if (total_read_len == ctx->track_size) {
+                message_t reply = {0};
+                reply.type = MSG_FETCH_FINISH;
+                reply.from = ctx;
+                reply.value.mem_block.length = read_len;
+                reply.value.mem_block.data = data;
+                xQueueSend(juggler_queue, &reply, portMAX_DELAY);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+
+                ESP_LOGI(
+                    TAG,
+                    "fetch finished with last block of data size: %d bytes",
+                    read_len);
+
+                vTaskDelete(NULL);
+                return;
+            } else {
+                message_t reply = {0};
+                reply.type = MSG_FETCH_MORE_DATA;
+                reply.from = ctx;
+                reply.value.mem_block.length = read_len;
+                reply.value.mem_block.data = data;
+                xQueueSend(juggler_queue, &reply, portMAX_DELAY);
+            }
+        } else if (read_len == 0) {
+            message_t reply = { .type = MSG_FETCH_FINISH, .from = ctx };
+            reply.value.mem_block.length = 0;
+            reply.value.mem_block.data = data; // don't forget this
+            xQueueSend(juggler_queue, &reply, portMAX_DELAY);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+
+            ESP_LOGI(TAG, "fetch finished without extra data");
+
+            vTaskDelete(NULL);
+            return;
         } else {
+            // TODO
         }
     }
 
@@ -760,6 +760,7 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
     }
 }
 
+
 static FRESULT prepare_chunk_file(const char *vfs_path) {
     FRESULT fr;
     FILINFO fno;
@@ -797,16 +798,7 @@ static void juggler(void *arg) {
     const char *TAG = "juggler";
     esp_err_t err;
     message_t msg;
-
-    fetch_context_t contexts[2] = {0};
-    chunk_data_t chunks[16] = {};
-
-    // allocate 8 data block, each one 16k
-    char* data[8] = {0};
-    for (int i = 0; i < 8; i++) {   
-        data[i] = (char*)malloc(16384);
-    }
-
+   
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
         .max_files = 64,
@@ -849,91 +841,173 @@ static void juggler(void *arg) {
                  esp_err_to_name(err));
     }
 
+    fetch_context_t* free_fetch_contexts[2] = {0};
     for (int i = 0; i < 2; i++) {
-        contexts[i].fetch_buffer_size = 65536;
-        contexts[i].fetch_buffer = (char *)malloc(65536);
-        assert(contexts[i].fetch_buffer);
+        free_fetch_contexts[i] =
+            (fetch_context_t *)malloc(sizeof(fetch_context_t));
+        memset(free_fetch_contexts[i], 0, sizeof(fetch_context_t));
+    }
+    int free_fetch_ctx_count = 2;
 
-        contexts[i].fetch_chunk_in = xQueueCreate(16, sizeof(void *));
-        contexts[i].play_chunk_in = xQueueCreate(16, sizeof(void *));
+    char* free_mem_blocks[8] = {0};
+    for (int i = 0; i < 8; i++) {
+        free_mem_blocks[i] = (char*)malloc(MEM_BLOCK_SIZE);
+        assert(free_mem_blocks[i]);
+    }
+    int free_mem_block_count = 8;
+
+    for (int i = 0; i < 2; i++) {
+        free_fetch_contexts[i]->fetch_chunk_in =
+            xQueueCreate(16, sizeof(message_t));
     }
 
-    // prepare 16 chunk files (deprecated)
-    for (int i = 0; i < 16; i++) {
-        const char *path = chunk_files[i];
-        chunks[i].path = chunk_files[i];
-
-        FRESULT fr = prepare_chunk_file(path);
-        if (fr != FR_OK) {
-            ESP_LOGI(TAG, "failed to prepare chunk file %s (%d)", path, fr);
-            continue;
-        }
-
-        FILE *fp = fopen(chunks[i].path, "r+");
-        if (fp == NULL) {
-            ESP_LOGI(TAG, "failed to open file %s, (%d)", chunks[i].path,
-                     errno);
-        } else {
-            fseek(fp, 0L, SEEK_END);
-            size_t size = ftell(fp);
-            ESP_LOGI(TAG, "size of %s: %d", chunks[i].path, size);
-            chunks[i].fp = fp;
-        }
+    FILE *fp;
+    fp = fopen(TEMP_FILE_PATH, "w");
+    if (!fp) {
+        ESP_LOGI(TAG, "failed to open (w) temp file (%d)", errno);
     }
+
+    fclose(fp);
+
+    fp = fopen(TEMP_FILE_PATH, "r+");
+    if (!fp) {
+        ESP_LOGI(TAG, "failed to open (r+) temp file (%d)", errno);
+    }
+
+    // TODO  
+    fseek(fp, 0L, SEEK_SET);
+
+    int file_written = 0;
+    int file_read = 0;
+    int file_size = 0;
+
+    fetch_context_t* playing_fetch_context = NULL;
 
     while (xQueueReceive(juggler_queue, &msg, portMAX_DELAY)) {
         switch (msg.type) {
         case MSG_CMD_PLAY: {
             ESP_LOGI(TAG, "play request received");
-            play_index++;
 
             play_command_data_t *data = msg.data;
 
             // prepare context for new play
-            fetch_context_t *ctx = &contexts[0];
-            strlcpy(ctx->url, data->tracks_url, 1024);
+            // TODO grasp fetch_context from queue
+            if (free_fetch_ctx_count == 0 || free_mem_block_count < 2) {
+                // TODO
+                ESP_LOGI(TAG, "no free context or mem blocks");
+            } else {
+                fetch_context_t *ctx = 
+                    free_fetch_contexts[free_fetch_ctx_count - 1];
 
-            ctx->digest = data->tracks[0].digest;
-            track_url_strlcat(ctx->url, ctx->digest, 1024);
+                // TODO reduce mem
+                strlcpy(ctx->url, data->tracks_url, 1024);
+                ctx->digest = data->tracks[0].digest;
+                track_url_strlcat(ctx->url, ctx->digest, 1024);
+                ctx->track_size = data->tracks[0].size;
+                ctx->play_started = false;
 
-            if (pdPASS !=
-                xTaskCreate(fetcher, "fetcher", 16384, ctx, 6, NULL)) {
-            }
-
-            for (int i = 0; i < 16; i++) {
-                chunk_data_t* cp = &chunks[i];
-                cp->chunk_index = i;
-                if (i == 0) {
-                    cp->blinks_array_size = data->blinks_array_size;
-                    cp->blinks = data->blinks; 
-                } else {
-                    cp->blinks_array_size = 0;
-                    cp->blinks = NULL;
+                if (pdPASS !=
+                    xTaskCreate(fetcher, "fetcher", 8192, ctx, 6, NULL)) {
+                    // TODO report error
+                    ESP_LOGI(TAG, "failed to start fetcher");
                 }
-                xQueueSend(ctx->fetch_chunk_in, &cp, 0);
+
+                playing_fetch_context = ctx;
+
+                message_t msg = {.type = MSG_FETCH_MORE };
+                msg.value.mem_block.data =
+                    free_mem_blocks[free_mem_block_count - 1];
+                free_mem_block_count--;
+                xQueueSend(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+
+                msg.value.mem_block.data =
+                    free_mem_blocks[free_mem_block_count - 1];
+                free_mem_block_count--;
+
+                xQueueSend(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+                // where to retrieve mem_block? and how much?
+
+                file_size = ctx->track_size;
+                file_read = 0;
+                file_written = 0;
+
             }
         } break;
-        case MSG_CHUNK_FETCHED: {
-            chunk_data_t* chunk = (chunk_data_t*)msg.data;
-            ESP_LOGI(TAG, "chunk ?? index: %d, size: %d",
-                     chunk->metadata.chunk_index, chunk->metadata.chunk_size);
-/*
-            size_t size = sizeof(audible_message_data_t);
-            audible_message_data_t *msg_data =
-                (audible_message_data_t *)malloc(size);
-            memset(msg_data, 0, size);
-            msg_data->new_play = TODO;
-            msg_data->chunk = chunk;
-            msg_data->blinks_array_size;
-*/
-            xQueueSend(audible_queue, &chunk, portMAX_DELAY);
-        } break;
-        case MSG_DATA_FETCHED: {
+
+        case MSG_FETCH_MORE_DATA: {
+            char* data = msg.value.mem_block.data;
+            int length = msg.value.mem_block.length;
+            fetch_context_t* ctx = msg.from;
+
+            // TODO error
+            fwrite(data, sizeof(char), length, fp);
+            fflush(fp);
+            file_written += msg.value.mem_block.length;
             
+            if (ctx->play_started == false) {
+                ctx->play_started = true;
+                msg.type = MSG_AUDIO_DATA;
+                msg.from = NULL;
+                xQueueSend(audible_queue, &msg, portMAX_DELAY);
+                file_read += length;
+            } else {
+                msg.type = MSG_FETCH_MORE;
+                xQueueSend(ctx->fetch_chunk_in, &msg, portMAX_DELAY);
+            }
         } break;
-        case MSG_CHUNK_PLAYED: {
-            ESP_LOGI(TAG, "(mp3) chunk played");
+
+        case MSG_FETCH_FINISH: {
+            char* data = msg.value.mem_block.data;
+            int length = msg.value.mem_block.length;
+            fetch_context_t* ctx = msg.from;
+
+            if (length > 0) {
+                // TODO error
+                fwrite(data, sizeof(char), length, fp);
+                fflush(fp);
+                file_written += length;
+
+                if (ctx->play_started == false) {
+                    ctx->play_started = true;
+                    msg.type = MSG_AUDIO_DATA;
+                    msg.from = NULL;
+                    xQueueSend(audible_queue, &msg, portMAX_DELAY);
+                    file_read += length;
+                } else {
+                    free_mem_blocks[free_mem_block_count++] = data;
+                }
+            } else {
+                free_mem_blocks[free_mem_block_count++] = data;
+            }
         } break;
+
+        case MSG_AUDIO_DONE: {
+            if (file_read < file_written) {
+                assert(file_written == ftell(fp));
+
+                fseek(fp, file_read, SEEK_SET);
+                int to_read = file_written - file_read;
+                if (to_read > MEM_BLOCK_SIZE) to_read = MEM_BLOCK_SIZE;
+
+                char *data = msg.value.mem_block.data;
+                int length = fread(data, sizeof(char), to_read, fp);
+                file_read += length;
+
+                fseek(fp, file_written, SEEK_SET);
+                
+                msg.type = MSG_AUDIO_DATA;
+                msg.from = NULL;  
+                msg.value.mem_block.length = length;
+
+                xQueueSend(audible_queue, &msg, portMAX_DELAY);
+            } else {
+                // starving !!! TODO 
+                // it seems that we need a way to record fetch context related
+                // to current play.
+                // playing_fetch_context->
+            }
+        } break;
+
         default:
             ESP_LOGI(TAG, "message received");
             break;
@@ -975,12 +1049,12 @@ void app_main(void) {
         ESP_LOGI(TAG, "failed to create juggler task for memory constraint");
     }
 
-    tcp_send_queue = xQueueCreate(20, sizeof(void *));
+    tcp_send_queue = xQueueCreate(20, sizeof(message_t));
     xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
 
     xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
     
-    audible_queue = xQueueCreate(8, sizeof(void *));
+    audible_queue = xQueueCreate(8, sizeof(message_t));
     xTaskCreatePinnedToCore(audible, "audible", 4096, NULL, 18, NULL, 1);
 
     // init nvs

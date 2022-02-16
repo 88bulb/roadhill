@@ -11,30 +11,6 @@
         (type *)((char *)__mptr - ))offsetof(type, member));                   \
     })
 
-typedef enum {
-    MSG_CMD_OTA = 0,
-    MSG_CMD_CONFIG,
-    MSG_CMD_PLAY,
-    MSG_CMD_STOP,
-    MSG_CHUNK_FETCHED,
-    MSG_DATA_FETCHED,
-    MSG_AUDIO_DATA_REQUEST,
-    MSG_CHUNK_PLAYED,
-    MSG_FETCH_MORE,
-    MSG_FETCH_ABORT
-} message_type_t;
-
-typedef struct {
-    int length;
-    char* data;
-} mem_block_t;
-
-// change this to tagged union
-typedef struct {
-    message_type_t type;
-    void *data;
-} message_t;
-
 typedef struct {
     char url[1024];
 } ota_command_data_t;
@@ -52,6 +28,54 @@ typedef struct {
     int time;
     uint8_t code[40]; 
 } blink_t;
+
+typedef enum {
+    MSG_CMD_OTA = 0,
+    MSG_CMD_CONFIG,
+    MSG_CMD_PLAY,
+    MSG_CMD_STOP,
+
+    MSG_FETCH_MORE,
+    MSG_FETCH_ABORT,
+    MSG_FETCH_MORE_DATA,
+    MSG_FETCH_FINISH,
+    MSG_FETCH_ERROR,
+    MSG_FETCH_ABORTED,
+
+    MSG_BLINK_DATA,
+    MSG_BLINK_ABORT,
+    MSG_BLINK_DONE,
+
+    MSG_AUDIO_DATA,
+    MSG_AUDIO_DONE,
+} message_type_t;
+
+typedef struct {
+    esp_err_t err;
+    char* data;
+} fetch_error_t; 
+
+typedef struct {
+    int length;
+    char* data;
+} mem_block_t;
+
+typedef struct {
+    int blinks_array_size;
+    blink_t* blinks; 
+} blink_data_t;
+
+// change this to tagged union
+typedef struct {
+    message_type_t type;
+    void *data;
+    void *from;
+    union {
+        fetch_error_t fetch_error;
+        mem_block_t mem_block; 
+        blink_data_t blink_data;
+    } value;
+} message_t;
 
 #define URL_BUFFER_SIZE (1024)
 #define TRACK_NAME_LENGTH (32)
@@ -91,17 +115,20 @@ typedef struct {
 } chunk_data_t;
 
 typedef struct {
+
     // TODO use pointer
     char url[URL_BUFFER_SIZE];
     md5_digest_t digest;
     int track_size;
 
     /** fetch gets chunk_data_t out of this queue */
-    int fetch_buffer_size;
-    char *fetch_buffer;
+    // int fetch_buffer_size;
+    // char *fetch_buffer;
 
+    bool play_started;
+     
     QueueHandle_t fetch_chunk_in;
-    QueueHandle_t play_chunk_in;
+        
 } fetch_context_t;
 
 

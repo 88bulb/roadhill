@@ -1,3 +1,5 @@
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -31,15 +33,6 @@ extern QueueHandle_t juggler_queue;
 extern QueueHandle_t audible_queue;
 extern QueueHandle_t ble_queue;
 
-extern int play_index;
-
-static blink_t *blinks = NULL;
-static int blinks_array_size = 0; 
-static int blink_next = -1;
-static int64_t blink_start = -1;
-
-static esp_timer_handle_t blink_timer;
-
 /**
 static esp_err_t unity_open(audio_element_handle_t self) {
     return ESP_OK;
@@ -70,26 +63,6 @@ static esp_err_t unity_close(audio_element_handle_t self) {
     return ESP_OK;
 }
 */
-
-extern QueueHandle_t ble_queue; 
-
-static void timer_cb(void* arg) {
-    if (blink_next < blinks_array_size) {
-        if (esp_timer_get_time() - blink_start >
-            blinks[blink_next].time * 1000) {
-            xQueueSend(ble_queue, &blinks[blink_next].code[0], 0);
-            blinks[blink_next].code[34] = 0;
-            ESP_LOGI(TAG, "blink: %s", (char *)blinks[blink_next].code);
-            blink_next++;
-        }
-    } else {
-        blinks_array_size = 0;
-        blinks = NULL; 
-        blink_start = -1;
-        blink_next = -1;
-        esp_timer_stop(blink_timer); 
-    }
-}
 
 /*
 static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
@@ -137,49 +110,105 @@ static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
 }
 */
 
+static char* data = NULL;
+static int data_length = 0;
+static int data_played = 0;
+
+static blink_t *blinks = NULL;
+static int blinks_array_size = 0; 
+
+static int blink_next = -1;
+static int64_t blink_start = -1;
+
+static esp_timer_handle_t blink_timer;
+
+extern QueueHandle_t ble_queue; 
+
+static void blink_done() {
+    if (blinks_array_size) {
+        blinks_array_size = 0;
+        blinks = NULL;
+        blink_start = -1;
+        blink_next = -1;
+        esp_timer_stop(blink_timer);
+
+        message_t msg = {.type = MSG_BLINK_DONE};
+
+        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+    }
+}
+
+static void timer_cb(void* arg) {
+    if (blink_next < blinks_array_size) {
+        if (esp_timer_get_time() - blink_start >
+            blinks[blink_next].time * 1000) {
+            xQueueSend(ble_queue, &blinks[blink_next].code[0], 0);
+            blinks[blink_next].code[34] = 0;
+            ESP_LOGI(TAG, "blink: %s", (char *)blinks[blink_next].code);
+            blink_next++;
+        }
+    } else {
+        
+
+        // xQueueSend
+    }
+}
+
+/**
+ * 1. this function is the only handler
+ * 2. no pre-empt (always send to back).
+ *
+ * so there's no data not played when abort. and as long as data available, play
+ * it.
+ */
 static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
                              TickType_t wait_time, void *ctx) {
-     
-    static chunk_data_t* chunk = NULL;
-    static int chunk_read = 0;
 
-    if (chunk == NULL) {
-        xQueueReceive(audible_queue, &chunk, wait_time); 
-        ESP_LOGI(TAG, "chunk index: %d", chunk->chunk_index);
-        if (chunk->chunk_index == 0) {
-            if (chunk->blinks_array_size > 0) {
-                blinks_array_size = chunk->blinks_array_size;
-                blinks = chunk->blinks;
+top:
+    if (data) {
+        if (len < data_length - data_played) {
+            memcpy(buf, &data[data_played], len);
+            data_played += len;
+        } else {
+            len = data_length - data_played;
+            memcpy(buf, &data[data_played], len);
 
-                ESP_LOGI(TAG, "blinks array size: %d", blinks_array_size);
+            message_t msg = {
+                .type = MSG_AUDIO_DONE,
+                .value = {.mem_block = {.length = data_length, .data = data}}};
 
-                esp_timer_start_periodic(blink_timer, 100000);
-                blink_start = esp_timer_get_time();
-                blink_next = 0;
-            } else {
-                blinks_array_size = 0;
-                blinks = NULL;
-                blink_next = -1;
-            }
+            xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+
+            data = NULL;
+            data_length = 0;
+            data_played = 0;
+
+            // no need to further "optimize", there is buffer. 
         }
-        chunk_read = 0;
-        fseek(chunk->fp, 0L, SEEK_SET);
+        return len;
     }
 
-    int chunk_size = chunk->metadata.chunk_size;
-    int chunk_left = chunk_size - chunk_read; 
-    int reading = (len <= chunk_left) ? len : chunk_left;
-    int read = fread(buf, 1, reading, chunk->fp);
-    chunk_read += read;
-    if (chunk_read == chunk_size) {
+    while (1) {
         message_t msg;
-        msg.type = MSG_CHUNK_PLAYED;
-        msg.data = chunk;
-        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-        chunk_read = 0;
-        chunk = NULL;
+        xQueueReceive(audible_queue, &msg, portMAX_DELAY);
+
+        if (msg.type == MSG_BLINK_DATA) {
+            blinks_array_size = msg.value.blink_data.blinks_array_size;
+            blinks = msg.value.blink_data.blinks;
+            blink_start = esp_timer_get_time();
+            blink_next = 0;
+            esp_timer_start_periodic(blink_timer, 100000);
+
+            ESP_LOGI(TAG, "blinks array size: %d", blinks_array_size);
+
+        } else if (msg.type == MSG_AUDIO_DATA) {
+            data = msg.value.mem_block.data;
+            data_length = msg.value.mem_block.length;
+            goto top;
+        } else if (msg.type == MSG_BLINK_ABORT) {
+            blink_done();
+        }
     }
-    return read;
 }
 
 void audible(void *arg) {
