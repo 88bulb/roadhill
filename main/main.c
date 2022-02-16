@@ -801,6 +801,12 @@ static void juggler(void *arg) {
     fetch_context_t contexts[2] = {0};
     chunk_data_t chunks[16] = {};
 
+    // allocate 8 data block, each one 16k
+    char* data[8] = {0};
+    for (int i = 0; i < 8; i++) {   
+        data[i] = (char*)malloc(16384);
+    }
+
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
         .max_files = 64,
@@ -852,6 +858,7 @@ static void juggler(void *arg) {
         contexts[i].play_chunk_in = xQueueCreate(16, sizeof(void *));
     }
 
+    // prepare 16 chunk files (deprecated)
     for (int i = 0; i < 16; i++) {
         const char *path = chunk_files[i];
         chunks[i].path = chunk_files[i];
@@ -920,6 +927,9 @@ static void juggler(void *arg) {
             msg_data->blinks_array_size;
 */
             xQueueSend(audible_queue, &chunk, portMAX_DELAY);
+        } break;
+        case MSG_DATA_FETCHED: {
+            
         } break;
         case MSG_CHUNK_PLAYED: {
             ESP_LOGI(TAG, "(mp3) chunk played");

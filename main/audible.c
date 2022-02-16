@@ -23,6 +23,9 @@
 
 const char *TAG = "audible";
 
+#define AUDIO_DATA_BUF_SIZE (16384)
+#define AUDIO_DATA_BUF_NUM (2)
+
 extern QueueHandle_t tcp_send_queue;
 extern QueueHandle_t juggler_queue;
 extern QueueHandle_t audible_queue;
@@ -88,6 +91,7 @@ static void timer_cb(void* arg) {
     }
 }
 
+/*
 static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
                              TickType_t wait_time, void *ctx) {
     static chunk_data_t* chunk = NULL;
@@ -131,9 +135,54 @@ static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
     }
     return read;
 }
+*/
+
+static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
+                             TickType_t wait_time, void *ctx) {
+     
+    static chunk_data_t* chunk = NULL;
+    static int chunk_read = 0;
+
+    if (chunk == NULL) {
+        xQueueReceive(audible_queue, &chunk, wait_time); 
+        ESP_LOGI(TAG, "chunk index: %d", chunk->chunk_index);
+        if (chunk->chunk_index == 0) {
+            if (chunk->blinks_array_size > 0) {
+                blinks_array_size = chunk->blinks_array_size;
+                blinks = chunk->blinks;
+
+                ESP_LOGI(TAG, "blinks array size: %d", blinks_array_size);
+
+                esp_timer_start_periodic(blink_timer, 100000);
+                blink_start = esp_timer_get_time();
+                blink_next = 0;
+            } else {
+                blinks_array_size = 0;
+                blinks = NULL;
+                blink_next = -1;
+            }
+        }
+        chunk_read = 0;
+        fseek(chunk->fp, 0L, SEEK_SET);
+    }
+
+    int chunk_size = chunk->metadata.chunk_size;
+    int chunk_left = chunk_size - chunk_read; 
+    int reading = (len <= chunk_left) ? len : chunk_left;
+    int read = fread(buf, 1, reading, chunk->fp);
+    chunk_read += read;
+    if (chunk_read == chunk_size) {
+        message_t msg;
+        msg.type = MSG_CHUNK_PLAYED;
+        msg.data = chunk;
+        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+        chunk_read = 0;
+        chunk = NULL;
+    }
+    return read;
+}
 
 void audible(void *arg) {
-
     esp_timer_init();
     esp_timer_create_args_t args = {
         .callback = &timer_cb,

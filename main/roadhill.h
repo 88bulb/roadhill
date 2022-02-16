@@ -17,9 +17,19 @@ typedef enum {
     MSG_CMD_PLAY,
     MSG_CMD_STOP,
     MSG_CHUNK_FETCHED,
+    MSG_DATA_FETCHED,
+    MSG_AUDIO_DATA_REQUEST,
     MSG_CHUNK_PLAYED,
+    MSG_FETCH_MORE,
+    MSG_FETCH_ABORT
 } message_type_t;
 
+typedef struct {
+    int length;
+    char* data;
+} mem_block_t;
+
+// change this to tagged union
 typedef struct {
     message_type_t type;
     void *data;
