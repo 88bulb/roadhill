@@ -319,6 +319,46 @@ blinks数组对象需提供剩下的17字节（34个hex char），包括前面2�
 
 ### Juggler
 
+Juggler的资源和状态是程序的核心部分，简化的设计是Juggler拥有全部资源，包括：
+
+1. `tcp_receive`能创建的`PLAY`资源；原则上，`tcp_receive`应该request一个`play_context_t`资源，使用`alloc`函数填写内容，包括分配内存；`play_context_t`的动态资源分配应该一次性操作和保证all or none，因此`play_command_data_t`只是过渡设计；
+2. 下载器需要的内存块；
+3. 播放器需要的内存块，两者都是固定大小，需要包含字段描述实际大小；
+
+
+
+Juggler可以使用下载器和cache文件播放，或仅使用cache文件播放。
+
+
+
+jjjjkkkj
+
+取消操作（`STOP`）
+
+对下载器而言，取消操作采用等到settled方式，对播放器而言可以不做特殊处理，也可以抢先（指在队列前塞入STOP语义）。
+
+
+
+发送给fetcher的消息包括fetch_more（包含mem_block_t）和fetch_abort；前者包含内存块。
+
+fetch返回的message包括data_fetched（包含mem_block_t），fetch_error（包含mem_block_t），fetch_finish（包含mem_block_t）；其中
+
+
+
+
+
+
+
+juggler在play任务
+
+
+
+
+
+
+
+
+
 `juggler`维护一组文件（64-256个）。每个文件内包含一个数据块，一个`header`，包含数据块的描述，和一个digest，表示文件的完整性。
 
 `juggler`使用这些文件完成如下任务：
@@ -422,7 +462,7 @@ Juggler和Fetcher使用[FreeRTOS Queue](https://www.freertos.org/Embedded-RTOS-Q
 
 
 
-Audible是一个drain模式；播放开始于
+Audible是一个drain模式；播放开始于Juggler第一次给audible_queue发送chunk。
 
 
 
