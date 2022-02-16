@@ -11,6 +11,9 @@
         (type *)((char *)__mptr - ))offsetof(type, member));                   \
     })
 
+typedef struct play_context play_context_t;
+typedef struct fetch_context fetch_context_t;
+
 typedef struct {
     char url[1024];
 } ota_command_data_t;
@@ -29,28 +32,6 @@ typedef struct {
     uint8_t code[40];
 } blink_t;
 
-typedef enum {
-    MSG_CMD_OTA = 0,
-    MSG_CMD_CONFIG,
-    MSG_CMD_PLAY,
-    MSG_CMD_STOP,
-
-    /** from juggler to fetcher,  */
-    MSG_FETCH_MORE,
-    MSG_FETCH_ABORT,
-    MSG_FETCH_MORE_DATA,
-    MSG_FETCH_FINISH,
-    MSG_FETCH_ERROR,
-    MSG_FETCH_ABORTED,
-
-    MSG_BLINK_DATA,
-    MSG_BLINK_ABORT,
-    MSG_BLINK_DONE,
-
-    MSG_AUDIO_DATA,
-    MSG_AUDIO_DONE,
-} message_type_t;
-
 typedef struct {
     esp_err_t err;
     char *data;
@@ -66,24 +47,54 @@ typedef struct {
     blink_t *blinks;
 } blink_data_t;
 
+typedef enum {
+    MSG_CMD_OTA = 0,
+    MSG_CMD_CONFIG,
+    MSG_CMD_PLAY,
+    MSG_CMD_STOP,
+
+    /** from juggler to fetcher */
+    MSG_FETCH_MORE,
+
+    /**
+     * from juggler to fetcher
+     */
+    MSG_FETCH_ABORT,
+
+    MSG_FETCH_MORE_DATA,
+    MSG_FETCH_FINISH,
+    MSG_FETCH_ERROR,
+    MSG_FETCH_ABORTED,
+
+    MSG_BLINK_DATA,
+    MSG_BLINK_ABORT,
+    MSG_BLINK_DONE,
+
+    MSG_AUDIO_DATA,
+    MSG_AUDIO_DONE,
+} message_type_t;
+
+typedef struct {
+    message_type_t type;
+
+    /**
+     * most components are singleton，and type clearly encoded the
+     * source and target of a message. The only exception is
+     * fetcher, which may have multiple instance in an optimized implementation.
+     */
+    void *from;
+
+    union {
+        fetch_error_t fetch_error;
+        mem_block_t mem_block;
+        blink_data_t blink_data;
+        play_context_t *play_context;
+    } value;
+} message_t;
+
 #define URL_BUFFER_SIZE (512)
 #define TRACK_NAME_LENGTH (32)
 #define FILENAME_BUFFER_SIZE (40)
-/**
-typedef struct {
-    uint32_t reply_bits;
-    uint32_t reply_serial;
-
-    char tracks_url[URL_BUFFER_SIZE];
-    int tracks_array_size;
-    track_t* tracks;
-    int blinks_array_size;
-    blink_t* blinks;
-} play_command_data_t;
-*/
-
-typedef struct play_context play_context_t;
-typedef struct fetch_context fetch_context_t;
 
 struct fetch_context {
     // TODO use pointer
@@ -128,24 +139,6 @@ struct play_context {
 
     fetch_context_t *fetch_ctx;
 };
-
-typedef struct {
-    message_type_t type;
-
-    /**
-     * most components are singleton，and type clearly encoded the
-     * source and target of a message. The only exception is
-     * fetcher, which may have multiple instance in an optimized implementation.
-     */
-    void *from;
-
-    union {
-        fetch_error_t fetch_error;
-        mem_block_t mem_block;
-        blink_data_t blink_data;
-        play_context_t *play_context;
-    } value;
-} message_t;
 
 /********************************************************************************
  *

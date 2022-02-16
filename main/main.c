@@ -83,6 +83,8 @@ extern const wifi_config_t sta_config_test_default;
 extern const wifi_config_t sta_config_prod_default;
 extern const wifi_config_t ap_config_default;
 
+#define TXBUF_SIZE (4096)
+#define RXBUF_SIZE (4096)
 static char *tx_buf = NULL;
 static int tx_len = 0;
 static char *rx_buf = NULL;
@@ -110,7 +112,7 @@ typedef enum {
     CMD_STOP,
 } command_type_t;
 
-static ota_command_data_t *ota_command_data;
+static ota_command_data_t *ota_command_data = NULL;
 
 typedef enum { BULB_NOTFOUND = 0, BULB_INVITING, BULB_READY } bulb_state_t;
 
@@ -173,8 +175,8 @@ bool is_valid_md5_hex_string(const char *name) {
  * function.
  */
 md5_digest_t track_name_to_digest(char *name) {
-
     md5_digest_t digest;
+
     for (int i = 0; i < 16; i++) {
         uint8_t u8;
         char high = name[2 * i];
@@ -318,6 +320,12 @@ static int process_line() {
     } else if (0 == strcmp(cmd, "PLAY")) {
         int tracks_array_size = 0;
         int blinks_array_size = 0;
+        char *tracks_url = NULL;
+        cJSON *tracks = NULL; 
+        cJSON *blinks = NULL;
+        track_t* _tracks = NULL;
+        blink_t* _blinks = NULL;
+        play_context_t* p = NULL;
 
         if (uxQueueMessagesWaiting(play_context_queue) == 0) {
             err = -1;
@@ -325,7 +333,7 @@ static int process_line() {
             goto finish;
         }
 
-        char *tracks_url = cJSON_GetObjectItem(root, "tracks_url")->valuestring;
+        tracks_url = cJSON_GetObjectItem(root, "tracks_url")->valuestring;
         if (tracks_url == NULL) {
             err = -1;
             ESP_LOGI(TAG, "play command has no tracks_url");
@@ -338,7 +346,7 @@ static int process_line() {
             goto finish;
         }
 
-        const cJSON *tracks = cJSON_GetObjectItem(root, "tracks");
+        tracks = cJSON_GetObjectItem(root, "tracks");
         if (!cJSON_IsArray(tracks)) {
             err = -1;
             ESP_LOGI(TAG, "tracks is not an array");
@@ -373,7 +381,7 @@ static int process_line() {
             }
         }
 
-        cJSON *blinks = cJSON_GetObjectItem(root, "blinks");
+        blinks = cJSON_GetObjectItem(root, "blinks");
         if (!cJSON_IsArray(blinks)) {
             err = -1;
             ESP_LOGI(TAG, "blinks is not an array");
@@ -420,7 +428,7 @@ static int process_line() {
             }
         }
 
-        track_t *_tracks = NULL;
+        _tracks = NULL;
         if (tracks_array_size) {
             _tracks = (track_t *)malloc(tracks_array_size * sizeof(track_t));
 
@@ -431,7 +439,7 @@ static int process_line() {
             }
         }
 
-        blink_t *_blinks = NULL;
+        _blinks = NULL;
         if (blinks_array_size) {
             _blinks = (blink_t *)malloc(blinks_array_size * sizeof(blink_t));
             if (_blinks == NULL) {
@@ -442,6 +450,8 @@ static int process_line() {
             }
         }
 
+        // TODO handling error but not critical
+        xQueueReceive(play_context_queue, &p, 0);
         memset(p, 0, sizeof(play_context_t));
         strcpy(p->tracks_url, tracks_url);
         p->tracks_array_size = tracks_array_size;
@@ -477,14 +487,15 @@ static int process_line() {
             // free many things but be sure to recycle play_context!
             ESP_LOGI(TAG, "failed to enqueue play request");
             goto finish;
+        } else {
+            ESP_LOGI(TAG, "play request enqueued");
         }
-
-        ESP_LOGI(TAG, "play request enqueued");
     }
 
 finish:
     if (data)
-        free(data); // TODO not fully freed!
+        free(data); // TODO not fully freed! ??? is it still so after
+                    // so many changes.
     if (root)
         cJSON_Delete(root);
     llen = 0;
@@ -672,17 +683,9 @@ static void http_ota(void *arg) {
     esp_restart();
 }
 
-/*8
-typedef struct {
-    char path[8];
-} chunk_file_path_t;
-*/
-
 /**
- * fetcher downloads media file and write to chunk file.
- *
- * is responsible for freeing config (arg) pointer, but
- * not queue.
+ * fetcher downloads track data and send them back to juggler.
+ * fetcher reads mem_block_t object out of context.
  */
 static void fetcher(void *arg) {
     fetch_context_t *ctx = (fetch_context_t *)arg;
@@ -881,12 +884,11 @@ static FRESULT prepare_chunk_file(const char *vfs_path) {
 }
 
 /**
- *
+ * juggler task
  */
 static void juggler(void *arg) {
     const char *TAG = "juggler";
     esp_err_t err;
-    message_t msg;
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
@@ -928,6 +930,17 @@ static void juggler(void *arg) {
                  "Failed to initialize the card (%s). "
                  "Make sure SD card lines have pull-up resistors in place.",
                  esp_err_to_name(err));
+    }
+
+    // TODO above sdmmic initialization should be moved to a subroutine.
+
+    message_t msg;
+
+    play_context_queue = xQueueCreate(2, sizeof(play_context_t *));
+    for (int i = 0; i < 2; i++) {
+        play_context_t *p = (play_context_t *)malloc(sizeof(play_context_t));
+        memset(p, 0, sizeof(play_context_t));
+        xQueueSend(play_context_queue, &p, portMAX_DELAY);
     }
 
     fetch_context_t *free_fetch_contexts[2] = {0};
@@ -1118,22 +1131,17 @@ void app_main(void) {
     line = (char *)malloc(LINE_LENGTH);
     memset(line, 0, LINE_LENGTH);
 
-    tx_buf = (char *)malloc(4096);
-    memset(tx_buf, 0, 4096);
-    rx_buf = (char *)malloc(4096);
-    memset(rx_buf, 0, 4096);
+    tx_buf = (char *)malloc(TXBUF_SIZE);
+    memset(tx_buf, 0, TXBUF_SIZE);
+    rx_buf = (char *)malloc(RXBUF_SIZE);
+    memset(rx_buf, 0, RXBUF_SIZE);
+
     ap_record = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * 20);
     memset(ap_record, 0, sizeof(wifi_ap_record_t) * 20);
+
     ota_command_data = (ota_command_data_t *)malloc(sizeof(ota_command_data_t));
 
     event_bits = xEventGroupCreate();
-
-    play_context_queue = xQueueCreate(2, sizeof(play_context_t *));
-    for (int i = 0; i < 2; i++) {
-        play_context_t *p = (play_context_t *)malloc(sizeof(play_context_t));
-        memset(p, 0, sizeof(play_context_t));
-        xQueueSend(play_context_queue, &p, portMAX_DELAY);
-    }
 
     /** this could be created on demand */
     http_ota_queue = xQueueCreate(1, sizeof(message_t));
