@@ -27,7 +27,9 @@ extern esp_err_t esp_vfs_exfat_sdmmc_mount(
     const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
     sdmmc_card_t **out_card);
 
+// this is a thread-safe resource queue
 QueueHandle_t play_context_queue;
+// this is a messaging queue
 QueueHandle_t juggler_queue;
 
 void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
@@ -45,7 +47,6 @@ void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
     strlcat(tracks_url, "/", size);
     strlcat(tracks_url, str, size);
 }
-
 
 /** TODO this function is not used anymore */
 FRESULT prepare_chunk_file(const char *vfs_path) {
@@ -122,6 +123,55 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
         ESP_LOGI(TAG, "sdmmc scr: sd_spec=%d, bus_width=%d", card->scr.sd_spec,
                  card->scr.bus_width);
     }
+}
+
+esp_err_t init_mmc() {
+    const char* TAG = "init_mmc";
+    esp_err_t err;
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = true,
+        .max_files = 64,
+        .allocation_unit_size = 64 * 1024};
+
+    sdmmc_card_t *card;
+    const char mount_point[] = MOUNT_POINT;
+    ESP_LOGI(TAG, "intializing SD card");
+
+    // Use settings defined above to initialize SD card and mount FAT
+    // filesystem. Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience
+    // functions. Please check its source code and implement error recovery when
+    // developing production applications.
+    ESP_LOGI(TAG, "Using SDMMC peripheral");
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+
+    // This initializes the slot without card detect (CD) and write protect (WP)
+    // signals. Modify slot_config.gpio_cd and slot_config.gpio_wp if your board
+    // has these signals.
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+    // To use 1-line SD mode, change this to 1:
+    slot_config.width = 1;
+
+    // Enable internal pullups on enabled pins. The internal pullups
+    // are insufficient however, please make sure 10k external pullups are
+    // connected on the bus. This is for debug / example purpose only.
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    ESP_LOGI(TAG, "mounting exfat on sdmmc");
+    err = esp_vfs_exfat_sdmmc_mount(mount_point, &host, &slot_config,
+                                    &mount_config, &card);
+    if (err == ESP_OK) {
+        sdmmc_card_info(card);
+    } else {
+        ESP_LOGE(TAG,
+                 "Failed to initialize the card (%s). "
+                 "Make sure SD card lines have pull-up resistors in place.",
+                 esp_err_to_name(err));
+    }
+
+    return err;
 }
 
 /**
@@ -257,53 +307,11 @@ static void fetcher(void *arg) {
  */
 void juggler(void *arg) {
     const char *TAG = "juggler";
-    esp_err_t err;
-
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,
-        .max_files = 64,
-        .allocation_unit_size = 64 * 1024};
-
-    sdmmc_card_t *card;
-    const char mount_point[] = MOUNT_POINT;
-    ESP_LOGI(TAG, "intializing SD card");
-
-    // Use settings defined above to initialize SD card and mount FAT
-    // filesystem. Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience
-    // functions. Please check its source code and implement error recovery when
-    // developing production applications.
-    ESP_LOGI(TAG, "Using SDMMC peripheral");
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-
-    // This initializes the slot without card detect (CD) and write protect (WP)
-    // signals. Modify slot_config.gpio_cd and slot_config.gpio_wp if your board
-    // has these signals.
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-
-    // To use 1-line SD mode, change this to 1:
-    slot_config.width = 1;
-
-    // Enable internal pullups on enabled pins. The internal pullups
-    // are insufficient however, please make sure 10k external pullups are
-    // connected on the bus. This is for debug / example purpose only.
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-
-    ESP_LOGI(TAG, "mounting exfat on sdmmc");
-    err = esp_vfs_exfat_sdmmc_mount(mount_point, &host, &slot_config,
-                                    &mount_config, &card);
-    if (err == ESP_OK) {
-        sdmmc_card_info(card);
-    } else {
-        ESP_LOGE(TAG,
-                 "Failed to initialize the card (%s). "
-                 "Make sure SD card lines have pull-up resistors in place.",
-                 esp_err_to_name(err));
-    }
-
-    // TODO above sdmmic initialization should be moved to a subroutine.
 
     message_t msg;
+
+    // TODO process error
+    init_mmc();
 
     // initialize play_context_t objects
     play_context_queue = xQueueCreate(2, sizeof(play_context_t *));
@@ -404,6 +412,8 @@ void juggler(void *arg) {
         } break;
 
         case MSG_FETCH_MORE_DATA: {
+            // write data to persitent store
+            // and fetch more
             char *data = msg.value.mem_block.data;
             int length = msg.value.mem_block.length;
             fetch_context_t *ctx = msg.from;
@@ -454,6 +464,8 @@ void juggler(void *arg) {
 
         case MSG_AUDIO_DONE: {
             if (file_read < file_written) {
+                // read more data and send to audible_queue
+
                 assert(file_written == ftell(fp));
 
                 fseek(fp, file_read, SEEK_SET);
