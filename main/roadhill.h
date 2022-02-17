@@ -5,6 +5,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+
+// used by mem_block_t
+#define MEM_BLOCK_SIZE (32768)
+
+
 #define container_of(ptr, type, member)                                        \
     ({                                                                         \
         const typeof(((type *)0)->member) *__mptr = (ptr);                     \
@@ -13,6 +18,13 @@
 
 typedef struct play_context play_context_t;
 typedef struct fetch_context fetch_context_t;
+
+extern QueueHandle_t play_context_queue;
+extern QueueHandle_t juggler_queue;
+extern QueueHandle_t tcp_send_queue;
+extern QueueHandle_t audible_queue;
+
+extern const char hex_char[16];
 
 typedef struct {
     char url[1024];
