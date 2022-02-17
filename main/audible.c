@@ -5,6 +5,8 @@
 #include "freertos/queue.h"
 #include "freertos/event_groups.h"
 
+#include "esp_err.h"
+
 #include "audio_element.h"
 #include "audio_pipeline.h"
 #include "audio_event_iface.h"
@@ -64,6 +66,28 @@ static esp_err_t unity_close(audio_element_handle_t self) {
 }
 */
 
+#define PERIPH_ID_CLOUD (AUDIO_ELEMENT_TYPE_PERIPH + 0xc1)
+#define PERIPH_CLOUD_CMD_TEST (0x7e57)
+
+static esp_periph_handle_t periph_cloud = NULL;
+
+esp_err_t periph_cloud_send_event(int cmd, void *data, int data_len) {
+    if (!periph_cloud) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return esp_periph_send_event(periph_cloud, cmd, data, data_len);
+}
+
+static esp_err_t periph_cloud_init(esp_periph_handle_t self) {
+    periph_cloud = self;
+    return ESP_OK;
+}
+
+static esp_err_t periph_cloud_deinit(esp_periph_handle_t self) {
+    periph_cloud = NULL;
+    return ESP_OK;
+}
+
 static char *data = NULL;
 static int data_length = 0;
 static int data_played = 0;
@@ -75,6 +99,7 @@ static int blink_next = -1;
 static int64_t blink_start = -1;
 
 static esp_timer_handle_t blink_timer;
+static esp_timer_handle_t test_timer;
 
 extern QueueHandle_t ble_queue;
 
@@ -102,9 +127,15 @@ static void timer_cb(void *arg) {
             blink_next++;
         }
     } else {
-
         // xQueueSend
     }
+}
+
+static void test_timer_cb(void *arg) {
+    static int test_counter = 0;
+    test_counter++;
+    periph_cloud_send_event(PERIPH_CLOUD_CMD_TEST, &test_counter,
+                            sizeof(test_counter));
 }
 
 /**
@@ -172,6 +203,13 @@ void audible(void *arg) {
     };
     esp_timer_create(&args, &blink_timer);
 
+    esp_timer_create_args_t test_args = {
+        .callback = &test_timer_cb,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "test",
+    };
+    esp_timer_create(&test_args, &test_timer);
+
     audio_pipeline_handle_t pipeline;
     audio_element_handle_t i2s_stream_writer, mp3_decoder;
 
@@ -238,6 +276,7 @@ void audible(void *arg) {
     ESP_LOGI(TAG, "[3.1] Initialize keys on board");
 
     audio_board_key_init(set);
+
     /**
         periph_button_cfg_t btn_cfg = {
             .gpio_mask = (1ULL << get_input_rec_id()) |
@@ -247,9 +286,20 @@ void audible(void *arg) {
         esp_periph_start(set, button_handle);
     */
 
-    ESP_LOGI(TAG, "[ 4 ] Set up  event listener");
+    ESP_LOGI(TAG, "[ 4 ] Set up event listener");
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
     audio_event_iface_handle_t evt = audio_event_iface_init(&evt_cfg);
+
+    // this is a stack variable, not the global one
+    // the global one is set/unset in init/deinit function
+    esp_periph_handle_t periph_cloud =
+        esp_periph_create(PERIPH_ID_CLOUD, "periph_cloud");
+    assert(periph_cloud);
+    esp_periph_set_data(periph_cloud, NULL);
+    esp_periph_set_function(periph_cloud, periph_cloud_init, NULL,
+                            periph_cloud_deinit);
+
+    esp_periph_start(set, periph_cloud);
 
     ESP_LOGI(TAG, "[4.1] Listening event from all elements of pipeline");
     audio_pipeline_set_listener(pipeline, evt);
@@ -265,10 +315,18 @@ void audible(void *arg) {
     // set_next_file_marker();
     audio_pipeline_run(pipeline);
 
+    esp_timer_start_periodic(test_timer, 1000000 * 5);
+
     while (1) {
         audio_event_iface_msg_t msg;
         esp_err_t ret = audio_event_iface_listen(evt, &msg, portMAX_DELAY);
         if (ret != ESP_OK) {
+            continue;
+        }
+
+        if (msg.source_type == PERIPH_ID_CLOUD &&
+            msg.cmd == PERIPH_CLOUD_CMD_TEST) {
+            ESP_LOGI(TAG, "periph_cloud test timer counts %d", *((int *)msg.data));
             continue;
         }
 
