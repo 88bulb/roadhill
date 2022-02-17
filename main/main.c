@@ -984,7 +984,6 @@ static void juggler(void *arg) {
 
     int file_written = 0;
     int file_read = 0;
-    // int file_size = 0;
 
     play_context_t *play_context = NULL;
 
