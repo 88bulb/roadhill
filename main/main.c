@@ -268,7 +268,7 @@ static void prepare_device_info() {
 }
 
 static int process_line() {
-    command_type_t cmd_type;
+    // command_type_t cmd_type;
     void *data = NULL;
     int err = 0;
 
@@ -288,8 +288,6 @@ static int process_line() {
     }
 
     if (0 == strcmp(cmd, "OTA")) {
-        cmd_type = CMD_OTA;
-
         char *url = cJSON_GetObjectItem(root, "url")->valuestring;
         if (url == NULL) {
             ESP_LOGI(TAG, "ota command without url property");
@@ -853,7 +851,8 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
     }
 }
 
-static FRESULT prepare_chunk_file(const char *vfs_path) {
+/** TODO this function is not used anymore */
+FRESULT prepare_chunk_file(const char *vfs_path) {
     FRESULT fr;
     FILINFO fno;
     const char *path = vfs_path + strlen(MOUNT_POINT) + 1;
@@ -882,6 +881,8 @@ static FRESULT prepare_chunk_file(const char *vfs_path) {
 
     return fr;
 }
+
+#define FETCH_INPUT_QUEUE_SIZE (4)
 
 /**
  * juggler task
@@ -936,6 +937,7 @@ static void juggler(void *arg) {
 
     message_t msg;
 
+    // initialize play_context_t objects
     play_context_queue = xQueueCreate(2, sizeof(play_context_t *));
     for (int i = 0; i < 2; i++) {
         play_context_t *p = (play_context_t *)malloc(sizeof(play_context_t));
@@ -943,6 +945,7 @@ static void juggler(void *arg) {
         xQueueSend(play_context_queue, &p, portMAX_DELAY);
     }
 
+    // initialize fetch_context_t objects
     fetch_context_t *free_fetch_contexts[2] = {0};
     for (int i = 0; i < 2; i++) {
         free_fetch_contexts[i] =
@@ -959,7 +962,8 @@ static void juggler(void *arg) {
     int free_mem_block_count = 8;
 
     for (int i = 0; i < 2; i++) {
-        free_fetch_contexts[i]->input = xQueueCreate(16, sizeof(message_t));
+        free_fetch_contexts[i]->input =
+            xQueueCreate(FETCH_INPUT_QUEUE_SIZE, sizeof(message_t));
     }
 
     FILE *fp;
@@ -980,11 +984,9 @@ static void juggler(void *arg) {
 
     int file_written = 0;
     int file_read = 0;
-    int file_size = 0;
+    // int file_size = 0;
 
     play_context_t *play_context = NULL;
-    fetch_context_t *primary_fetch_context = NULL;
-    fetch_context_t *seconary_fetch_context = NULL;
 
     while (xQueueReceive(juggler_queue, &msg, portMAX_DELAY)) {
         switch (msg.type) {
@@ -1028,7 +1030,7 @@ static void juggler(void *arg) {
                 xQueueSend(ctx->input, &msg, portMAX_DELAY);
                 // where to retrieve mem_block? and how much?
 
-                file_size = ctx->track_size;
+                // file_size = ctx->track_size;
                 file_read = 0;
                 file_written = 0;
             }
