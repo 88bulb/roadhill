@@ -298,7 +298,7 @@ blinks数组对象需提供剩下的17字节（34个hex char），包括前面2�
 
 ## Roadhill Design
 
-### FreeRTOS Tasks
+### FreeRTOS Tasks, pipeline
 
 程序结构上用FreeRTOS任务划分，包括：
 
@@ -313,15 +313,65 @@ blinks数组对象需提供剩下的17字节（34个hex char），包括前面2�
 
 
 
+```
+tcp_receive -> audible -> juggler -> [0..n] Fetcher
+```
+
+### Data Flow
+
+
+
+
+
 灯的播放详细设计还没有完全完成。灯谱包含在PLAY消息内，该消息JSON解析后的数据结构完整传递给juggler，juggler传递给audible。应该是先跑通音频下载播放任务之后，
 
 
 
 ### Juggler
 
-Juggler的资源和状态是程序的核心部分，简化的设计是Juggler拥有全部资源，包括：
+Juggler的资源和状态是程序的核心部分，简化的设计是Juggler拥有全部资源。资源应该针对task私有化，如果担心资源的初始化有跨task的等待，可以使用event group实现。
 
-1. `tcp_receive`能创建的`PLAY`资源；原则上，`tcp_receive`应该request一个`play_context_t`资源，使用`alloc`函数填写内容，包括分配内存；`play_context_t`的动态资源分配应该一次性操作和保证all or none，因此`play_command_data_t`只是过渡设计；
+
+
+#### Resources
+
+##### `play_context_t`, struct and object
+
+Since there is no class in C, using `object` as the term for the instance of `struct` is appropriate.
+
+There are **two** objects of type `play_context_t`. This is enough for one is used by juggler and the other used for storing result parsed from json in `tcp_receive` task. They are stored in a freertos Queue, which is used as a thread-safe FIFO. There is no need to have global variables or array of variables to hold the pointer.
+
+- When the object is allocated? in tcp_receive then passed to juggler.
+- When the object is deallocated (put back to queue)? juggler always hold a current_play_context, it is replaced only when another one arrives. 
+
+
+
+play context may or may not have a track to play, if it have track to play, it's going to have a file resource, with a filename derived from tracks[0] and a corresponding possibly a fetcher task associated. 
+
+
+
+每个音频文件使用一个缓冲文件在esp32上不是一个好办法，因为在需要管理时遍历文件系统非常慢，不如自己写index file和在大文件内直接分配。但是在开发阶段，这个不同实际上是可以封装掉的。最终Play过程是通过接口实现文件查询和读写。如果使用临时文件缓冲，例如在内存中建立一次性的映射表或者在emmc上使用有限数量的文件记录cache，在这种设计下，每个文件的FILE指针（fp）可以记录在play_context_t内。
+
+
+
+##### fetch_context_t, struct and object
+
+fetch_context_t stores context of a fetch task. a fetch task may be detached from a play process.
+
+- When the object is allocated?
+- When the object is deallocated?
+
+
+
+##### mem_block_t, struct and object
+
+
+
+
+
+
+
+1. `tcp_receive`能创建的`PLAY`资源；原则上，`tcp_receive`应该request一个`play_context_t`资源，`play_context_t`的动态资源分配应该一次性操作和保证all or none，因此`play_command_data_t`只是过渡设计；
 2. 下载器需要的内存块；
 3. 播放器需要的内存块，两者都是固定大小，需要包含字段描述实际大小；
 
@@ -340,6 +390,14 @@ jjjjkkkj
 
 
 发送给fetcher的消息包括fetch_more（包含mem_block_t）和fetch_abort；前者包含内存块。
+
+```C
+
+```
+
+fetch_more
+
+
 
 fetch返回的message包括data_fetched（包含mem_block_t），fetch_error（包含mem_block_t），fetch_finish（包含mem_block_t）；其中
 
@@ -428,6 +486,10 @@ juggler发出的message
 给fetcher的
 
 下载的url，总文件hash，文件大小，一定数量的data chunk file；
+
+
+
+
 
 
 
