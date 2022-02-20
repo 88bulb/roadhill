@@ -212,7 +212,7 @@ STATE_INFO
 
 ### PLAY
 
-标注为*的属性目前不支持。
+标注为*的属性目前不支持，时间单位全部为ms（milli-second）。
 
 ```json
 {
@@ -224,11 +224,17 @@ STATE_INFO
     "tracks": [
         {
             "name": "43a5155e9d3772406fb51b9fb3c5e668",
-            "size": 12345
+            "size": 12345,
+            "start": 0,
+            "dur": 60000,
+            "chan": 0,
         },
         {
         	"name": "972f619d7f82864a3b11b0e7b37d993e",
-            "size": 4321
+            "size": 4321,
+            "start": 8000,
+            "dur"
+            "chan": 1
         }
     ],
     "blinks": [
@@ -260,11 +266,27 @@ STATE_INFO
 
 #### tracks
 
-需要播放的音乐文件列表，其中每个元素包含`name`属性，是文件的MD5，hex格式字符串；包含`size`属性，是文件大小。网关默认给文件加上`.mp3`扩展名，例如上述例子中的`tracks[0]`的下载地址会解释成：
+需要播放的音乐文件列表，含如下属性：
+
+| -     | -                      | -    | -                                            |
+| ----- | ---------------------- | ---- | -------------------------------------------- |
+| name  | 32字符的hex code字符串 | 必须 | 声音文件名称，也是其md5值                    |
+| size  | 正整数                 | 必须 | 声音文件大小                                 |
+| start | 正整数                 | 必须 | 开始播放时间，单位ms                         |
+| dur   | 正整数                 | 必须 | 播放长度，注意是播放长度，不是文件的音频时间 |
+| chan  | 通道                   | 必须 | 0为背景，1为前景                             |
+
+
+
+下载时网关默认给文件加上`.mp3`扩展名，例如上述例子中的`tracks[0]`的下载地址会解释成：
 
 `http://10.42.0.1/files/album0001/43a5155e9d3772406fb51b9fb3c5e668.mp3`
 
-网关仅会立刻播放`tracks[0]`指定的音乐文件，并且不会在播放停止后自动开始播放下一个音乐文件，云服务器必须再次发送PLAY命令并且把需要播放的音乐文件设为`tracks[0]`。
+~~网关仅会立刻播放`tracks[0]`指定的音乐文件，并且不会在播放停止后自动开始播放下一个音乐文件，云服务器必须再次发送PLAY命令并且把需要播放的音乐文件设为`tracks[0]`~~
+
+网关会把所有track播放完。
+
+
 
 #### blinks
 
@@ -277,6 +299,8 @@ PLAY命令中不包含magic（`b01bc0de`，4字节)，sequence number（1字节�
 blinks数组对象需提供剩下的17字节（34个hex char），包括前面2个字节的`mask`，和剩余15字节的`code`，如例子所示。
 
 时间单位固定使用毫秒（msec），不增设属性描述。
+
+
 
 #### start
 
@@ -296,7 +320,7 @@ blinks数组对象需提供剩下的17字节（34个hex char），包括前面2�
 
 
 
-## Roadhill Design
+## Roadhill Internal Design
 
 ### FreeRTOS Tasks, pipeline
 
@@ -317,7 +341,56 @@ blinks数组对象需提供剩下的17字节（34个hex char），包括前面2�
 tcp_receive -> audible -> juggler -> [0..n] Fetcher
 ```
 
-### Data Flow
+### Control and Data Flow, PLAY, REPLAY, and STOP
+
+#### PLAY, tcp_receive -> audible
+
+`tcp_receive`收到`PLAY`指令后构建通过音频消息接口的消息，使用`periph_cloud_send_event`发送，其中`void* data`参数发送`play_context_t`对象，
+
+```c
+struct play_context {
+    uint32_t index;
+    uint32_t reply_bits;	/* reserved */
+    uint32_t reply_serial;	/* reserved */
+    char* tracks_url;
+    int tracks_array_size;
+    track_t *tracks;
+    int blinks_array_size;
+    blink_t *blinks;
+}
+
+struct play_data {
+    uint32_t index;
+    char *tracks_url;
+    int tracks_array_size;
+    track_t *tracks;
+}
+```
+
+memory management
+
+- play_context
+
+  - allocated by tcp_receive (in process_line);
+  - audible一直保留最后一个play_context，在收到新的play_context时，旧的被回收（handling PERIPH_CLOUD_CMD_PLAY);
+
+- tracks and tracks_url
+
+  - tracks和tracks_url是可选的，如果不存在，这两个值均为NULL且tracks_array_size为0;
+  - allocated by tcp_receive
+  - audible仅维护收到的play_context和blinks，不维护tracks和tracks_url；在收到play_context时，audible即时创建一个新的play_data结构，**移动**相应的内存资源到新的结构体发送给juggler; 无论收到的play_context是否包含tracks，audible都会发送play_data给juggler，回收相应的资源责任交给了juggler；
+
+- blinks
+
+  - blinks是可选的，如果不存在，该值为NULL且blinks_array_size为0;
+  - allocated by tcp_receive
+  - audible的主任务上下文不需要保存blinks，index+blinks应该发送到audio_queue，
+
+  
+
+
+
+
 
 
 
