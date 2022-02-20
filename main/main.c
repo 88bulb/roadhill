@@ -35,6 +35,9 @@
 
 extern void audible(void *arg);
 extern void juggler(void *arg);
+extern esp_err_t periph_cloud_send_event(int cmd, void *data, int data_len);
+
+static uint32_t play_index = 0;
 
 static const char *TAG = "roadhill";
 const char hex_char[16] = "0123456789abcdef";
@@ -46,7 +49,7 @@ static EventGroupHandle_t event_bits;
 static QueueHandle_t http_ota_queue;
 
 QueueHandle_t tcp_send_queue;
-QueueHandle_t audible_queue;
+QueueHandle_t audio_queue;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -286,177 +289,240 @@ static int process_line() {
         ESP_LOGI(TAG, "ota request queued, url: %s", url);
 
     } else if (0 == strcmp(cmd, "PLAY")) {
-        int tracks_array_size = 0;
-        int blinks_array_size = 0;
-        char *tracks_url = NULL;
         cJSON *tracks = NULL; 
-        cJSON *blinks = NULL;
+        int tracks_array_size = 0;
         track_t* _tracks = NULL;
+        char *tracks_url = NULL;
+        char* _tracks_url = NULL;
+
+        cJSON *blinks = NULL;
+        int blinks_array_size = 0;
         blink_t* _blinks = NULL;
+
         play_context_t* p = NULL;
 
-        if (uxQueueMessagesWaiting(play_context_queue) == 0) {
-            err = -1;
-            ESP_LOGI(TAG, "no available context to construct a play operation");
-            goto finish;
-        }
-
-        tracks_url = cJSON_GetObjectItem(root, "tracks_url")->valuestring;
-        if (tracks_url == NULL) {
-            err = -1;
-            ESP_LOGI(TAG, "play command has no tracks_url");
-            goto finish;
-        }
-
-        if (!(strlen(tracks_url) + TRACK_NAME_LENGTH < URL_BUFFER_SIZE)) {
-            err = -1;
-            ESP_LOGI(TAG, "play command tracks_url too long");
-            goto finish;
-        }
-
+        // tracks is optional
         tracks = cJSON_GetObjectItem(root, "tracks");
-        if (!cJSON_IsArray(tracks)) {
-            err = -1;
-            ESP_LOGI(TAG, "tracks is not an array");
-            goto finish;
+        if (tracks) {
+            if (!cJSON_IsArray(tracks)) {
+                err = -1;
+                ESP_LOGI(TAG, "tracks is not an array");
+                goto finish;
+            }
+
+            tracks_array_size = cJSON_GetArraySize(tracks);
+            if (tracks_array_size > 0) {
+                tracks_url =
+                    cJSON_GetObjectItem(root, "tracks_url")->valuestring;
+                if (tracks_url == NULL) {
+                    err = -1;
+                    ESP_LOGI(TAG, "play command has no tracks_url");
+                    goto finish;
+                }
+
+                if (0 == strlen(tracks_url)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "tracks_url is an empty string");
+                    goto finish;
+                }
+
+                if (!(strlen(tracks_url) + TRACK_NAME_LENGTH <
+                      URL_BUFFER_SIZE)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "play command tracks_url too long");
+                    goto finish;
+                }
+            }
+
+            for (int i = 0; i < tracks_array_size; i++) {
+                cJSON *item = cJSON_GetArrayItem(tracks, i);
+
+                cJSON *name = cJSON_GetObjectItem(item, "name");
+                if (!cJSON_IsString(name)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "track[%d] name is not a string", i);
+                    goto finish;
+                }
+
+                char *name_str = name->valuestring;
+                if (!is_valid_md5_hex_string(name_str)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "track[%d] name '%s' is not a md5 hex string",
+                             i, name_str);
+                    goto finish;
+                }
+
+                cJSON *size = cJSON_GetObjectItem(item, "size");
+                if (!cJSON_IsNumber(size)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "track[%d] size is not a number", i);
+                    goto finish;
+                }
+            }
         }
 
-        tracks_array_size = cJSON_GetArraySize(tracks);
-
-        for (int i = 0; i < tracks_array_size; i++) {
-            cJSON *item = cJSON_GetArrayItem(tracks, i);
-
-            cJSON *name = cJSON_GetObjectItem(item, "name");
-            if (!cJSON_IsString(name)) {
-                err = -1;
-                ESP_LOGI(TAG, "track[%d] name is not a string", i);
-                goto finish;
-            }
-
-            char *name_str = name->valuestring;
-            if (!is_valid_md5_hex_string(name_str)) {
-                err = -1;
-                ESP_LOGI(TAG, "track[%d] name '%s' is not a md5 hex string", i,
-                         name_str);
-                goto finish;
-            }
-
-            cJSON *size = cJSON_GetObjectItem(item, "size");
-            if (!cJSON_IsNumber(size)) {
-                err = -1;
-                ESP_LOGI(TAG, "track[%d] size is not a number", i);
-                goto finish;
-            }
-        }
-
+        // blinks is optional also
         blinks = cJSON_GetObjectItem(root, "blinks");
-        if (!cJSON_IsArray(blinks)) {
+        if (blinks) {
+            if (!cJSON_IsArray(blinks)) {
+                err = -1;
+                ESP_LOGI(TAG, "blinks is not an array");
+                goto finish;
+            }
+
+            blinks_array_size = cJSON_GetArraySize(blinks);
+            for (int i = 0; i < blinks_array_size; i++) {
+                cJSON *item = cJSON_GetArrayItem(blinks, i);
+
+                cJSON *time = cJSON_GetObjectItem(item, "time");
+                if (!cJSON_IsNumber(time)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "blink[%d] time is not a number", i);
+                    goto finish;
+                }
+
+                cJSON *mask = cJSON_GetObjectItem(item, "mask");
+                if (!cJSON_IsString(mask)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "blink[%d] mask is not a string", i);
+                    goto finish;
+                }
+
+                char *mask_str = mask->valuestring;
+                if (!is_hex_string(mask_str, 4)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "blink[%d] maks is not a valid hex string",
+                             i);
+                    goto finish;
+                }
+
+                cJSON *code = cJSON_GetObjectItem(item, "code");
+                if (!cJSON_IsString(code)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "blink[%d] code is not a string", i);
+                    goto finish;
+                }
+
+                char *code_str = code->valuestring;
+                if (!is_hex_string(code_str, 30)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "blink[%d] code is not a valid hex string",
+                             i);
+                    goto finish;
+                }
+            }
+        }
+
+        if (tracks == NULL && blinks == NULL) {
             err = -1;
-            ESP_LOGI(TAG, "blinks is not an array");
+            ESP_LOGI(TAG, "neither tracks nor blinks provided");
             goto finish;
         }
 
-        blinks_array_size = cJSON_GetArraySize(blinks);
-        for (int i = 0; i < blinks_array_size; i++) {
-            cJSON *item = cJSON_GetArrayItem(blinks, i);
+        /** now let allocate memory */
+        p = (play_context_t*)malloc(sizeof(play_context_t));
+        if (p == NULL) {
+            err = -1;
+            ESP_LOGI(TAG, "failed to allocate memory for play_context");   
+            goto finish;
+        } 
 
-            cJSON *time = cJSON_GetObjectItem(item, "time");
-            if (!cJSON_IsNumber(time)) {
-                err = -1;
-                ESP_LOGI(TAG, "blink[%d] time is not a number", i);
-                goto finish;
-            }
-
-            cJSON *mask = cJSON_GetObjectItem(item, "mask");
-            if (!cJSON_IsString(mask)) {
-                err = -1;
-                ESP_LOGI(TAG, "blink[%d] mask is not a string", i);
-                goto finish;
-            }
-
-            char *mask_str = mask->valuestring;
-            if (!is_hex_string(mask_str, 4)) {
-                err = -1;
-                ESP_LOGI(TAG, "blink[%d] maks is not a valid hex string", i);
-                goto finish;
-            }
-
-            cJSON *code = cJSON_GetObjectItem(item, "code");
-            if (!cJSON_IsString(code)) {
-                err = -1;
-                ESP_LOGI(TAG, "blink[%d] code is not a string", i);
-                goto finish;
-            }
-
-            char *code_str = code->valuestring;
-            if (!is_hex_string(code_str, 30)) {
-                err = -1;
-                ESP_LOGI(TAG, "blink[%d] code is not a valid hex string", i);
-                goto finish;
-            }
-        }
-
-        _tracks = NULL;
         if (tracks_array_size) {
             _tracks = (track_t *)malloc(tracks_array_size * sizeof(track_t));
-
             if (_tracks == NULL) {
+                free(p);
                 err = -1;
                 ESP_LOGI(TAG, "failed to allocate memory for tracks");
                 goto finish;
             }
+
+            _tracks_url = (char*)malloc(strlen(tracks_url) + 1);
+            if (_tracks_url == NULL ) {
+                free(p);
+                free(tracks);
+                err = -1;
+                ESP_LOGI(TAG, "failed to allocate memory for tracks_url");
+            }
+            strcpy(_tracks_url, tracks_url); 
         }
 
         _blinks = NULL;
         if (blinks_array_size) {
             _blinks = (blink_t *)malloc(blinks_array_size * sizeof(blink_t));
             if (_blinks == NULL) {
-                free(_tracks);
+                free(p);
+                if (_tracks) {
+                    free(_tracks);
+                    free(_tracks_url);
+                }
                 err = -1;
                 ESP_LOGI(TAG, "failed to allocate memory for blinks");
                 goto finish;
             }
         }
 
-        // TODO handling error but not critical
-        xQueueReceive(play_context_queue, &p, 0);
         memset(p, 0, sizeof(play_context_t));
-        strcpy(p->tracks_url, tracks_url);
-        p->tracks_array_size = tracks_array_size;
-        p->tracks = _tracks;
-        p->blinks_array_size = blinks_array_size;
-        p->blinks = _blinks;
 
-        for (int i = 0; i < p->tracks_array_size; i++) {
-            cJSON *item = cJSON_GetArrayItem(tracks, i);
-            p->tracks[i].digest = track_name_to_digest(
-                cJSON_GetObjectItem(item, "name")->valuestring);
-            p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
-        }
+        if (tracks_array_size) {
+            p->tracks_url = _tracks_url;
+            p->tracks_array_size = tracks_array_size;
+            p->tracks = _tracks;
 
-        for (int i = 0; i < p->blinks_array_size; i++) {
-            cJSON *item = cJSON_GetArrayItem(blinks, i);
-
-            p->blinks[i].time = cJSON_GetObjectItem(item, "time")->valueint;
-            const char *mask = cJSON_GetObjectItem(item, "mask")->valuestring;
-            for (int j = 0; j < 4; j++) {
-                p->blinks[i].code[j] = mask[j];
-            }
-
-            const char *code = cJSON_GetObjectItem(item, "code")->valuestring;
-            for (int j = 0; j < 30; j++) {
-                p->blinks[i].code[j + 4] = code[j];
+            for (int i = 0; i < p->tracks_array_size; i++) {
+                cJSON *item = cJSON_GetArrayItem(tracks, i);
+                p->tracks[i].digest = track_name_to_digest(
+                    cJSON_GetObjectItem(item, "name")->valuestring);
+                p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
             }
         }
 
-        message_t msg = {.type = MSG_CMD_PLAY, .value = {.play_context = p}};
-        if (pdTRUE != xQueueSend(juggler_queue, &msg, 0)) {
-            err = -1;
-            // free many things but be sure to recycle play_context!
+        if (blinks_array_size) {
+            p->blinks_array_size = blinks_array_size;
+            p->blinks = _blinks;
+
+            for (int i = 0; i < p->blinks_array_size; i++) {
+                cJSON *item = cJSON_GetArrayItem(blinks, i);
+
+                p->blinks[i].time = cJSON_GetObjectItem(item, "time")->valueint;
+                const char *mask =
+                    cJSON_GetObjectItem(item, "mask")->valuestring;
+                for (int j = 0; j < 4; j++) {
+                    p->blinks[i].code[j] = mask[j];
+                }
+
+                const char *code =
+                    cJSON_GetObjectItem(item, "code")->valuestring;
+                for (int j = 0; j < 30; j++) {
+                    p->blinks[i].code[j + 4] = code[j];
+                }
+            }
+        }
+
+        // message_t msg = {.type = MSG_CMD_PLAY, .value = {.play_context = p}};
+        // if (pdTRUE != xQueueSend(juggler_queue, &msg, 0)) {
+        // if (pdTRUE != xQueueSend(juggler_queue, &msg, 0)) {
+
+        play_index++;
+        p->index = play_index;
+
+        /**
+         * audible has a higher priority than this task, so the sent message
+         * may appear after receiver's message in log
+         */
+        err = periph_cloud_send_event(PERIPH_CLOUD_CMD_PLAY, p, sizeof(p));
+        if (err != ESP_OK) {
+            free(p);
+            if (tracks_array_size) {
+                free(_tracks);
+                free(_tracks_url);
+            } 
+            if (blinks_array_size) {
+                free(_blinks);
+            }
             ESP_LOGI(TAG, "failed to enqueue play request");
             goto finish;
         } else {
-            ESP_LOGI(TAG, "play request enqueued");
+            ESP_LOGI(TAG, "play command sent to audible");
         }
     }
 
@@ -564,7 +630,7 @@ static void tcp_receive(void *arg) {
         }
 
         while (1) {
-            int len = recv(sock, rx_buf, sizeof(rx_buf), 0);
+            int len = recv(sock, rx_buf, RXBUF_SIZE, 0);
             if (len < 0) {
                 ESP_LOGI(TAG, "recv error (%d)", errno);
                 goto closing;
@@ -679,7 +745,7 @@ void app_main(void) {
     /** this could be created on demand */
     http_ota_queue = xQueueCreate(1, sizeof(message_t));
     tcp_send_queue = xQueueCreate(8, sizeof(message_t));
-    audible_queue = xQueueCreate(8, sizeof(message_t));
+    audio_queue = xQueueCreate(8, sizeof(message_t));
     juggler_queue = xQueueCreate(8, sizeof(message_t));
 
     xTaskCreate(http_ota, "http_ota", 16384, NULL, 11, NULL);
