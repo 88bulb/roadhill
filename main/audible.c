@@ -32,8 +32,10 @@ const char *TAG = "audible";
 
 extern QueueHandle_t tcp_send_queue;
 extern QueueHandle_t juggler_queue;
-extern QueueHandle_t audible_queue;
+extern QueueHandle_t audio_queue;
 extern QueueHandle_t ble_queue;
+
+play_context_t* play_context = NULL;
 
 /**
 static esp_err_t unity_open(audio_element_handle_t self) {
@@ -66,9 +68,6 @@ static esp_err_t unity_close(audio_element_handle_t self) {
 }
 */
 
-#define PERIPH_ID_CLOUD (AUDIO_ELEMENT_TYPE_PERIPH + 0xc1)
-#define PERIPH_CLOUD_CMD_TEST (0x7e57)
-
 static esp_periph_handle_t periph_cloud = NULL;
 
 esp_err_t periph_cloud_send_event(int cmd, void *data, int data_len) {
@@ -87,6 +86,8 @@ static esp_err_t periph_cloud_deinit(esp_periph_handle_t self) {
     periph_cloud = NULL;
     return ESP_OK;
 }
+
+
 
 static char *data = NULL;
 static int data_length = 0;
@@ -173,7 +174,7 @@ top:
 
     while (1) {
         message_t msg;
-        xQueueReceive(audible_queue, &msg, portMAX_DELAY);
+        xQueueReceive(audio_queue, &msg, portMAX_DELAY);
 
         if (msg.type == MSG_BLINK_DATA) {
             blinks_array_size = msg.value.blink_data.blinks_array_size;
@@ -194,6 +195,13 @@ top:
     }
 }
 
+/**
+ * audible
+ * 1. recv cloud command from event interface
+ * 2. recv audio data from audible queue
+ * 
+ * audible has only one 
+ */
 void audible(void *arg) {
     esp_timer_init();
     esp_timer_create_args_t args = {
@@ -324,9 +332,62 @@ void audible(void *arg) {
             continue;
         }
 
-        if (msg.source_type == PERIPH_ID_CLOUD &&
-            msg.cmd == PERIPH_CLOUD_CMD_TEST) {
-            ESP_LOGI(TAG, "periph_cloud test timer counts %d", *((int *)msg.data));
+        if (msg.source_type == PERIPH_ID_CLOUD) {
+            switch (msg.cmd) {
+            case PERIPH_CLOUD_CMD_PLAY: {
+                /**
+                 * there is a little chance that this process
+                 * race with esp_timer callback , ie. a mutex for
+                 * play_context may be necessary
+                 */
+
+                /**
+                 * blinking is stopped SYNCHRONOUSLY by stopping timer
+                 * play_context is updated instantly, and read_cb will
+                 * check play_index for each mem_block.
+                 *
+                 * index, tracks array and url is sent to next handler
+                 * immediately even if there is no tracks, which acting 
+                 * as a stop
+                 */
+                play_context_t *p;
+                if (play_context) {
+                    // is this idempotent? answer: it returns error if
+                    // timer is already stopped, but harmless
+                    esp_timer_stop(blink_timer);
+                    if (play_context->blinks) {
+                        free(play_context->blinks);
+                    }
+                }
+
+                p = (play_context_t*)msg.data;
+                message_t msg = {.type = MSG_CMD_PLAY};
+                msg.value.play_data.index = p->index;
+                msg.value.play_data.tracks_url = p->tracks_url;
+                msg.value.play_data.tracks_array_size = p->tracks_array_size;
+                msg.value.play_data.tracks = p->tracks;
+                
+                // handler error, otherwise memory leak
+                if (pdTRUE != xQueueSend(juggler_queue, &msg, portMAX_DELAY)) {
+                    // free memory if ownership not transferred to next
+                    if (p->tracks_array_size > 0) {
+                        free(p->tracks_url);    
+                        free(p->tracks);
+                    }
+                }
+                p->tracks_url = NULL;
+                p->tracks = NULL;
+                play_context = p;
+
+                ESP_LOGI(TAG, "play command (%u) processed", p->index);
+            } break;
+            case PERIPH_CLOUD_CMD_TEST:
+                ESP_LOGI(TAG, "periph_cloud test timer counts %d",
+                         *((int *)msg.data));
+                break;
+            default:
+                break;
+            }
             continue;
         }
 

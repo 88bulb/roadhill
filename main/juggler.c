@@ -79,7 +79,6 @@ FRESULT prepare_chunk_file(const char *vfs_path) {
     return fr;
 }
 
-
 /**
  * Print sdmmc info for given card
  */
@@ -108,9 +107,9 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
         ESP_LOGI(TAG, "sdmmc speed: %d MHz%s", card->max_freq_khz / 1000,
                  card->is_ddr ? ", DDR" : "");
     }
-    ESP_LOGI(TAG, "sdmmc size: %lluMB",
+    ESP_LOGI(TAG, "sdmmc size: %lluMB, sector size: %d",
              ((uint64_t)card->csd.capacity) * card->csd.sector_size /
-                 (1024 * 1024));
+                 (1024 * 1024), card->csd.sector_size);
 
     if (print_csd) {
         ESP_LOGI(
@@ -126,7 +125,7 @@ static void sdmmc_card_info(const sdmmc_card_t *card) {
 }
 
 esp_err_t init_mmc() {
-    const char* TAG = "init_mmc";
+    const char *TAG = "init_mmc";
     esp_err_t err;
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -179,10 +178,9 @@ esp_err_t init_mmc() {
  * fetcher reads mem_block_t object out of context.
  */
 static void fetcher(void *arg) {
-    const char* TAG = "fetcher"; // TODO add file name?
+    const char *TAG = "fetcher"; // TODO add file name?
     fetch_context_t *ctx = (fetch_context_t *)arg;
     esp_err_t err;
-    
 
     ESP_LOGI(TAG, "fetching: %s", ctx->url);
 
@@ -245,6 +243,7 @@ static void fetcher(void *arg) {
         assert(msg.type == MSG_FETCH_MORE);
         assert(msg.value.mem_block.data);
 
+        msg.value.mem_block.play_index = ctx->play_index;
         char *data = msg.value.mem_block.data;
         read_len = esp_http_client_read(client, data, MEM_BLOCK_SIZE);
         total_read_len += read_len;
@@ -301,7 +300,6 @@ static void fetcher(void *arg) {
     vTaskDelete(NULL);
 }
 
-
 /**
  * juggler task
  */
@@ -342,6 +340,7 @@ void juggler(void *arg) {
             xQueueCreate(FETCH_INPUT_QUEUE_SIZE, sizeof(message_t));
     }
 
+    // currently, this only for *playing* file
     FILE *fp;
     fp = fopen(TEMP_FILE_PATH, "w");
     if (!fp) {
@@ -361,54 +360,68 @@ void juggler(void *arg) {
     int file_written = 0;
     int file_read = 0;
 
-    play_context_t *play_context = NULL;
+    uint32_t playing_index = 0;
+    char *playing_tracks_url = NULL;
+    track_t playing_track;
 
     while (xQueueReceive(juggler_queue, &msg, portMAX_DELAY)) {
         switch (msg.type) {
         case MSG_CMD_PLAY: {
-            ESP_LOGI(TAG, "play request received");
+            ESP_LOGI(TAG, "play command received");
 
-            play_context = msg.value.play_context;
+            playing_index = msg.value.play_data.index;
 
-            // prepare context for new play
-            // TODO grasp fetch_context from queue
-            if (free_fetch_ctx_count == 0 || free_mem_block_count < 2) {
-                // TODO
-                ESP_LOGI(TAG, "no free context or mem blocks");
+            if (playing_tracks_url)
+                free(playing_tracks_url);
+            playing_tracks_url = msg.value.play_data.tracks_url;
+
+            if (msg.value.play_data.tracks_array_size) {
+                playing_track = msg.value.play_data.tracks[0];
             } else {
-                fetch_context_t *ctx =
-                    free_fetch_contexts[free_fetch_ctx_count - 1];
-
-                // TODO reduce mem
-                strlcpy(ctx->url, play_context->tracks_url, 1024);
-                ctx->digest = play_context->tracks[0].digest;
-                track_url_strlcat(ctx->url, ctx->digest, 1024);
-                ctx->track_size = play_context->tracks[0].size;
-                ctx->play_started = false;
-
-                if (pdPASS !=
-                    xTaskCreate(fetcher, "fetcher", 8192, ctx, 6, NULL)) {
-                    // TODO report error
-                    ESP_LOGI(TAG, "failed to start fetcher");
-                }
-
-                message_t msg = {.type = MSG_FETCH_MORE};
-                msg.value.mem_block.data =
-                    free_mem_blocks[free_mem_block_count - 1];
-                free_mem_block_count--;
-                xQueueSend(ctx->input, &msg, portMAX_DELAY);
-
-                msg.value.mem_block.data =
-                    free_mem_blocks[free_mem_block_count - 1];
-                free_mem_block_count--;
-
-                xQueueSend(ctx->input, &msg, portMAX_DELAY);
-                // where to retrieve mem_block? and how much?
-
-                // file_size = ctx->track_size;
-                file_read = 0;
-                file_written = 0;
+                playing_track.size = 0;
             }
+
+            // TODO
+            free(msg.value.play_data.tracks);
+
+            // from old code
+            fetch_context_t *ctx =
+                free_fetch_contexts[free_fetch_ctx_count - 1];
+
+            ctx->play_index = playing_index;
+
+            // TODO reduce mem
+            strlcpy(ctx->url, playing_tracks_url, URL_BUFFER_SIZE);
+            ctx->digest = playing_track.digest;
+            track_url_strlcat(ctx->url, ctx->digest, URL_BUFFER_SIZE);
+            ctx->track_size = playing_track.size;
+            ctx->play_started = false;
+
+            if (pdPASS != xTaskCreate(fetcher, "fetcher", 8192, ctx, 6, NULL)) {
+                // TODO report error
+                ESP_LOGI(TAG, "failed to start fetcher");
+            } else {
+                ESP_LOGI(TAG, "new fetcher");
+            }
+
+            message_t msg = {.type = MSG_FETCH_MORE};
+            msg.value.mem_block.data =
+                free_mem_blocks[free_mem_block_count - 1];
+            free_mem_block_count--;
+            xQueueSend(ctx->input, &msg, portMAX_DELAY);
+
+            msg.value.mem_block.data =
+                free_mem_blocks[free_mem_block_count - 1];
+            free_mem_block_count--;
+
+            xQueueSend(ctx->input, &msg, portMAX_DELAY);
+
+            // where to retrieve mem_block? and how much?
+
+            // file_size = ctx->track_size;
+            file_read = 0;
+            file_written = 0;
+
         } break;
 
         case MSG_FETCH_MORE_DATA: {
@@ -418,7 +431,6 @@ void juggler(void *arg) {
             int length = msg.value.mem_block.length;
             fetch_context_t *ctx = msg.from;
 
-            // TODO error
             fwrite(data, sizeof(char), length, fp);
             fflush(fp);
             file_written += msg.value.mem_block.length;
@@ -428,13 +440,14 @@ void juggler(void *arg) {
                 msg.type = MSG_AUDIO_DATA;
                 msg.from = NULL;
 
-                xQueueSend(audible_queue, &msg, portMAX_DELAY);
-
+                xQueueSend(audio_queue, &msg, portMAX_DELAY);
                 file_read += length;
             } else {
                 msg.type = MSG_FETCH_MORE;
                 xQueueSend(ctx->input, &msg, portMAX_DELAY);
             }
+
+            // ESP_LOGI(TAG, "MSG_FETCH_MORE_DATA");
         } break;
 
         case MSG_FETCH_FINISH: {
@@ -452,7 +465,7 @@ void juggler(void *arg) {
                     ctx->play_started = true;
                     msg.type = MSG_AUDIO_DATA;
                     msg.from = NULL;
-                    xQueueSend(audible_queue, &msg, portMAX_DELAY);
+                    xQueueSend(audio_queue, &msg, portMAX_DELAY);
                     file_read += length;
                 } else {
                     free_mem_blocks[free_mem_block_count++] = data;
@@ -464,7 +477,7 @@ void juggler(void *arg) {
 
         case MSG_AUDIO_DONE: {
             if (file_read < file_written) {
-                // read more data and send to audible_queue
+                // read more data and send to audio_queue
 
                 assert(file_written == ftell(fp));
 
@@ -483,7 +496,7 @@ void juggler(void *arg) {
                 msg.from = NULL;
                 msg.value.mem_block.length = length;
 
-                xQueueSend(audible_queue, &msg, portMAX_DELAY);
+                xQueueSend(audio_queue, &msg, portMAX_DELAY);
             } else {
                 // starving !!! TODO
                 // it seems that we need a way to record fetch context related
@@ -498,4 +511,3 @@ void juggler(void *arg) {
         }
     }
 }
-

@@ -9,12 +9,19 @@
 // used by mem_block_t
 #define MEM_BLOCK_SIZE (32768)
 
-
 #define container_of(ptr, type, member)                                        \
     ({                                                                         \
         const typeof(((type *)0)->member) *__mptr = (ptr);                     \
         (type *)((char *)__mptr - ))offsetof(type, member));                   \
     })
+
+#define PERIPH_ID_CLOUD (AUDIO_ELEMENT_TYPE_PERIPH + 0xc1)
+
+#define PERIPH_CLOUD_CMD_OTA (0)
+#define PERIPH_CLOUD_CMD_CONFIG (1)
+#define PERIPH_CLOUD_CMD_PLAY (2)
+#define PERIPH_CLOUD_CMD_STOP (3)
+#define PERIPH_CLOUD_CMD_TEST (0x7e57)
 
 typedef struct play_context play_context_t;
 typedef struct fetch_context fetch_context_t;
@@ -22,7 +29,7 @@ typedef struct fetch_context fetch_context_t;
 extern QueueHandle_t play_context_queue;
 extern QueueHandle_t juggler_queue;
 extern QueueHandle_t tcp_send_queue;
-extern QueueHandle_t audible_queue;
+extern QueueHandle_t audio_queue;
 
 extern const char hex_char[16];
 
@@ -50,9 +57,18 @@ typedef struct {
 } fetch_error_t;
 
 typedef struct {
+    int play_index; 
     int length;
     char *data;
 } mem_block_t;
+
+/** for MSG_CMD_PLAY */
+typedef struct {
+    uint32_t index;
+    char *tracks_url;
+    int tracks_array_size;
+    track_t *tracks;
+} play_data_t;
 
 typedef struct {
     int blinks_array_size;
@@ -100,7 +116,8 @@ typedef struct {
         fetch_error_t fetch_error;
         mem_block_t mem_block;
         blink_data_t blink_data;
-        play_context_t *play_context;
+        play_data_t play_data;
+//        play_context_t *play_context;
     } value;
 } message_t;
 
@@ -113,6 +130,7 @@ struct fetch_context {
     char url[URL_BUFFER_SIZE];
     md5_digest_t digest;
     int track_size;
+    uint32_t play_index; 
     bool play_started;
 
     QueueHandle_t input;
@@ -136,20 +154,19 @@ struct fetch_context {
  * to a new job if it happens to be the tracks[0] of the new play.
  */
 struct play_context {
+    uint32_t index;
+
     /** reserved */
     uint32_t reply_bits;
     /** reserved */
     uint32_t reply_serial;
 
-    char tracks_url[URL_BUFFER_SIZE];
-
+    char *tracks_url;
     int tracks_array_size;
     track_t *tracks;
 
     int blinks_array_size;
     blink_t *blinks;
-
-    fetch_context_t *fetch_ctx;
 };
 
 /********************************************************************************
@@ -174,3 +191,5 @@ typedef struct {
     int blinks_array_size;
     int chunk_index;
 } chunk_data_t;
+
+
