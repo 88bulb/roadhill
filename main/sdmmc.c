@@ -11,6 +11,8 @@
 #include "vfs_fat_internal.h"
 #include "esp_vfs_fat.h"
 
+#include "roadhill.h"
+
 #define CHECK_EXECUTE_RESULT(err, str)                                         \
     do {                                                                       \
         if ((err) != ESP_OK) {                                                 \
@@ -21,14 +23,7 @@
 
 static const char *TAG = "sdmmc";
 
-#define SIZE_1MB ((int64_t)(1024 * 1024))
-#define SIZE_1GB ((int64_t)(1024 * SIZE_1MB))
-
-
-#define BLOCK_NUM_BOUND (16 * 8 * 1024)
-#define BLOCK_NUM_FRACT (14 * 8 * 1024)
-
-static uint64_t round_up_to_next_power_of_2(uint64_t n) {
+uint64_t round_up_to_next_power_of_2(uint64_t n) {
     n = n - 1;
     while (n & (n - 1)) {
         n = n & (n - 1);
@@ -42,8 +37,51 @@ static uint64_t siffs_block_size(DWORD fre_sect) {
 }
 
 static uint64_t siffs_file_size(DWORD fre_sect) {
-    return (uint64_t)64 * 1024 * 1024 +
-           round_up_to_next_power_of_2((uint64_t)fre_sect * 512) * 7 / 8;
+    return DATA_OFFSET + round_up_to_next_power_of_2((uint64_t)fre_sect * 512) *
+                             BLOCK_NUM_FRACT;
+}
+
+static void sdmmc_card_info(const sdmmc_card_t *card) {
+    bool print_scr = true;
+    bool print_csd = true;
+    const char *type;
+
+    char *TAG = pcTaskGetName(NULL);
+
+    ESP_LOGI(TAG, "sdmmc name: %s", card->cid.name);
+    if (card->is_sdio) {
+        type = "SDIO";
+        print_scr = true;
+        print_csd = true;
+    } else if (card->is_mmc) {
+        type = "MMC";
+        print_csd = true;
+    } else {
+        type = (card->ocr & SD_OCR_SDHC_CAP) ? "SDHC/SDXC" : "SDSC";
+    }
+    ESP_LOGI(TAG, "sdmmc type: %s", type);
+    if (card->max_freq_khz < 1000) {
+        ESP_LOGI(TAG, "sdmmc speed: %d kHz", card->max_freq_khz);
+    } else {
+        ESP_LOGI(TAG, "sdmmc speed: %d MHz%s", card->max_freq_khz / 1000,
+                 card->is_ddr ? ", DDR" : "");
+    }
+    ESP_LOGI(TAG, "sdmmc size: %lluMB, sector size: %d",
+             ((uint64_t)card->csd.capacity) * card->csd.sector_size /
+                 (1024 * 1024),
+             card->csd.sector_size);
+
+    if (print_csd) {
+        ESP_LOGI(
+            TAG,
+            "sdmmc csd: ver=%d, sector_size=%d, capacity=%d read_bl_len=%d",
+            card->csd.csd_ver, card->csd.sector_size, card->csd.capacity,
+            card->csd.read_block_len);
+    }
+    if (print_scr) {
+        ESP_LOGI(TAG, "sdmmc scr: sd_spec=%d, bus_width=%d", card->scr.sd_spec,
+                 card->scr.bus_width);
+    }
 }
 
 static esp_err_t mount_prepare_mem(const char *base_path, BYTE *out_pdrv,
@@ -89,8 +127,7 @@ cleanup:
  *
  */
 static esp_err_t prepare_card(const esp_vfs_fat_mount_config_t *mount_config,
-                                const char *drv, sdmmc_card_t *card,
-                                BYTE pdrv) {
+                              const char *drv, sdmmc_card_t *card, BYTE pdrv) {
     FRESULT res = FR_OK;
     const size_t workbuf_size = 4096;
     esp_err_t err;
@@ -156,8 +193,8 @@ static esp_err_t prepare_card(const esp_vfs_fat_mount_config_t *mount_config,
     // !!! CANNOT BE FREED HERE
     // free(fs);
 
-    FIL* fp = (FIL*)malloc(sizeof(FIL));
-    res = f_open(fp, "temp", FA_WRITE | FA_CREATE_ALWAYS);
+    FIL *fp = (FIL *)malloc(sizeof(FIL));
+    res = f_open(fp, "temp", FA_READ | FA_WRITE | FA_CREATE_ALWAYS);
     if (res) {
         free(fp);
         f_unmount("");
@@ -170,15 +207,52 @@ static esp_err_t prepare_card(const esp_vfs_fat_mount_config_t *mount_config,
     ESP_LOGI(TAG, "prepare mmc card, expand to file size: %llu", file_size);
 
     res = f_expand(fp, file_size, 1);
-    f_close(fp);
-    free(fp);
     if (res) {
+        f_close(fp);
+        free(fp);
         f_unlink("temp");
         f_unmount("");
         free(fs);
         ESP_LOGI(TAG, "prepare mmc card, failed to expand temp file (%d)", res);
         return ESP_FAIL;
     }
+
+    res = f_lseek(fp, (FSIZE_t)0);
+    if (res) {
+        f_close(fp);
+        free(fp);
+        f_unlink("temp");
+        f_unmount("");
+        free(fs);
+        ESP_LOGI(TAG, "prepare mmc card, f_lseek error (%d)", res);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "write zero to first 64MB space");
+
+    unsigned int buf_size = 64 * 1024;
+    uint8_t *buf = (uint8_t*)malloc(buf_size);
+    memset(buf, 0, buf_size);
+    unsigned int written;
+    for (int i = 0; i < (DATA_OFFSET / buf_size); i++) {
+        res = f_write(fp, buf, buf_size, &written);
+        if (res || written != buf_size) {
+            f_close(fp);
+            free(fp);
+            f_unlink("temp");
+            f_unmount("");
+            free(buf);
+            free(fs);
+            ESP_LOGI(TAG, "prepare mmc card, f_write error (%d)", res);
+            return ESP_FAIL;
+        }
+    }
+
+    ESP_LOGI(TAG, "done");
+
+    free(buf);
+    f_close(fp);
+    free(fp);
 
     res = f_rename("temp", "siffs");
     if (res) {
@@ -188,7 +262,7 @@ static esp_err_t prepare_card(const esp_vfs_fat_mount_config_t *mount_config,
         return ESP_FAIL;
     }
 
-    res = f_unmount(""); 
+    res = f_unmount("");
     if (res) {
         ESP_LOGI(TAG, "prepare mmc card, failed to unmount (%d)", res);
         free(fs);
@@ -283,7 +357,7 @@ try_mount:
                 goto try_mount;
             }
 
-        }    break;
+        } break;
         default:
             err = ESP_FAIL;
             goto fail;
@@ -301,7 +375,7 @@ fail:
     return err;
 }
 
-esp_err_t esp_vfs_exfat_sdmmc_mount(
+static esp_err_t esp_vfs_exfat_sdmmc_mount(
     const char *base_path, const sdmmc_host_t *host_config,
     const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
     sdmmc_card_t **out_card) {
@@ -349,5 +423,54 @@ cleanup:
     }
     free(card);
     free(dup_path);
+    return err;
+}
+
+esp_err_t init_mmc() {
+    const char *TAG = "init_mmc";
+    esp_err_t err;
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = true,
+        .max_files = 64,
+        .allocation_unit_size = 64 * 1024};
+
+    sdmmc_card_t *card;
+    const char mount_point[] = MOUNT_POINT;
+    ESP_LOGI(TAG, "intializing SD card");
+
+    // Use settings defined above to initialize SD card and mount FAT
+    // filesystem. Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience
+    // functions. Please check its source code and implement error recovery when
+    // developing production applications.
+    ESP_LOGI(TAG, "Using SDMMC peripheral");
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+
+    // This initializes the slot without card detect (CD) and write protect (WP)
+    // signals. Modify slot_config.gpio_cd and slot_config.gpio_wp if your board
+    // has these signals.
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+    // To use 1-line SD mode, change this to 1:
+    slot_config.width = 1;
+
+    // Enable internal pullups on enabled pins. The internal pullups
+    // are insufficient however, please make sure 10k external pullups are
+    // connected on the bus. This is for debug / example purpose only.
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    ESP_LOGI(TAG, "mounting exfat on sdmmc");
+    err = esp_vfs_exfat_sdmmc_mount(mount_point, &host, &slot_config,
+                                    &mount_config, &card);
+    if (err == ESP_OK) {
+        sdmmc_card_info(card);
+    } else {
+        ESP_LOGE(TAG,
+                 "Failed to initialize the card (%s). "
+                 "Make sure SD card lines have pull-up resistors in place.",
+                 esp_err_to_name(err));
+    }
+
     return err;
 }

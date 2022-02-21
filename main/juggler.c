@@ -15,17 +15,41 @@
 
 #include "roadhill.h"
 
-#define MOUNT_POINT "/emmc"
-#define CHUNK_FILE_SIZE (1024 * 1024)
-#define TEMP_FILE_PATH "/emmc/temp"
-
 #define FETCH_INPUT_QUEUE_SIZE (4)
 
+#define ALLOC_MAP_SIZE (BLOCK_NUM_BOUND * BLOCK_NUM_FRACT)
+// uint8_t alloc_map[ALLOC_MAP_SIZE / sizeof(uint8_t)] = {};
+uint8_t* alloc_map = NULL;
+
+int block_size = 0;
+
+int size_in_blocks(uint32_t size) {
+    return size / block_size + (size % block_size) ? 1 : 0;
+}
+
+bool siffs_alloc(uint32_t blk_addr, int bits) {
+    if (blk_addr + bits > ALLOC_MAP_SIZE) return false;
+    
+    for (uint32_t addr = blk_addr; addr < blk_addr + bits; addr++) {
+        if (alloc_map[addr / 8] & (1 << (addr % 8)))
+            return false;
+    }
+
+    for (uint32_t addr = blk_addr; addr < blk_addr + bits; addr++) {
+        alloc_map[addr / 8] |= (1 << (addr % 8));
+    }
+    return true;
+}
+
 // defined in sdmmc
+/*
 extern esp_err_t esp_vfs_exfat_sdmmc_mount(
     const char *base_path, const sdmmc_host_t *host_config,
     const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
     sdmmc_card_t **out_card);
+*/
+
+extern esp_err_t init_mmc();
 
 // this is a thread-safe resource queue
 QueueHandle_t play_context_queue;
@@ -77,100 +101,6 @@ FRESULT prepare_chunk_file(const char *vfs_path) {
     }
 
     return fr;
-}
-
-/**
- * Print sdmmc info for given card
- */
-static void sdmmc_card_info(const sdmmc_card_t *card) {
-    bool print_scr = true;
-    bool print_csd = true;
-    const char *type;
-
-    char *TAG = pcTaskGetName(NULL);
-
-    ESP_LOGI(TAG, "sdmmc name: %s", card->cid.name);
-    if (card->is_sdio) {
-        type = "SDIO";
-        print_scr = true;
-        print_csd = true;
-    } else if (card->is_mmc) {
-        type = "MMC";
-        print_csd = true;
-    } else {
-        type = (card->ocr & SD_OCR_SDHC_CAP) ? "SDHC/SDXC" : "SDSC";
-    }
-    ESP_LOGI(TAG, "sdmmc type: %s", type);
-    if (card->max_freq_khz < 1000) {
-        ESP_LOGI(TAG, "sdmmc speed: %d kHz", card->max_freq_khz);
-    } else {
-        ESP_LOGI(TAG, "sdmmc speed: %d MHz%s", card->max_freq_khz / 1000,
-                 card->is_ddr ? ", DDR" : "");
-    }
-    ESP_LOGI(TAG, "sdmmc size: %lluMB, sector size: %d",
-             ((uint64_t)card->csd.capacity) * card->csd.sector_size /
-                 (1024 * 1024), card->csd.sector_size);
-
-    if (print_csd) {
-        ESP_LOGI(
-            TAG,
-            "sdmmc csd: ver=%d, sector_size=%d, capacity=%d read_bl_len=%d",
-            card->csd.csd_ver, card->csd.sector_size, card->csd.capacity,
-            card->csd.read_block_len);
-    }
-    if (print_scr) {
-        ESP_LOGI(TAG, "sdmmc scr: sd_spec=%d, bus_width=%d", card->scr.sd_spec,
-                 card->scr.bus_width);
-    }
-}
-
-esp_err_t init_mmc() {
-    const char *TAG = "init_mmc";
-    esp_err_t err;
-
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,
-        .max_files = 64,
-        .allocation_unit_size = 64 * 1024};
-
-    sdmmc_card_t *card;
-    const char mount_point[] = MOUNT_POINT;
-    ESP_LOGI(TAG, "intializing SD card");
-
-    // Use settings defined above to initialize SD card and mount FAT
-    // filesystem. Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience
-    // functions. Please check its source code and implement error recovery when
-    // developing production applications.
-    ESP_LOGI(TAG, "Using SDMMC peripheral");
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-
-    // This initializes the slot without card detect (CD) and write protect (WP)
-    // signals. Modify slot_config.gpio_cd and slot_config.gpio_wp if your board
-    // has these signals.
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-
-    // To use 1-line SD mode, change this to 1:
-    slot_config.width = 1;
-
-    // Enable internal pullups on enabled pins. The internal pullups
-    // are insufficient however, please make sure 10k external pullups are
-    // connected on the bus. This is for debug / example purpose only.
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-
-    ESP_LOGI(TAG, "mounting exfat on sdmmc");
-    err = esp_vfs_exfat_sdmmc_mount(mount_point, &host, &slot_config,
-                                    &mount_config, &card);
-    if (err == ESP_OK) {
-        sdmmc_card_info(card);
-    } else {
-        ESP_LOGE(TAG,
-                 "Failed to initialize the card (%s). "
-                 "Make sure SD card lines have pull-up resistors in place.",
-                 esp_err_to_name(err));
-    }
-
-    return err;
 }
 
 /**
@@ -300,16 +230,108 @@ static void fetcher(void *arg) {
     vTaskDelete(NULL);
 }
 
+void die_another_day() {
+    // 24 hours
+    vTaskDelay(24 * 60 * 60 * 1000 / portTICK_PERIOD_MS);
+    esp_restart();
+}
+
 /**
  * juggler task
  */
 void juggler(void *arg) {
     const char *TAG = "juggler";
-
+    esp_err_t err;
     message_t msg;
 
-    // TODO process error
-    init_mmc();
+    ESP_LOGI(TAG, "preparing mmc card...");
+ 
+    err = init_mmc();
+    if (err) {
+        ESP_LOGW(TAG, "failed to initialize mmc card");
+        die_another_day();
+    }
+
+    // uint16_t fre_clust;
+    // f_getfree("0:", &fre_clust, NULL);
+
+    FILINFO fno;
+    FRESULT res = f_stat("siffs", &fno);
+    if (res != FR_OK) {
+        ESP_LOGW(TAG, "siffs file not found, f_stat error (%d)", res);
+        die_another_day();
+    }
+
+    assert(fno.fsize > DATA_OFFSET);
+    block_size =
+        (fno.fsize - DATA_OFFSET) / (BLOCK_NUM_BOUND * BLOCK_NUM_FRACT);
+
+    assert((block_size & (block_size - 1)) == 0);
+
+    FIL fil;
+    res = f_open(&fil, "siffs", FA_READ | FA_WRITE);
+    if (res) {
+        ESP_LOGW(TAG, "failed to open siffs file, f_open error (%d)", res);
+        die_another_day();
+    }
+
+    alloc_map = (uint8_t*)malloc(ALLOC_MAP_SIZE / sizeof(uint8_t));
+
+    unsigned int read;
+    int entries = 0;
+    int used_blocks = 0;
+    int bucket_count = 0;
+    int read_buf_size = 16 * 1024;
+    uint8_t *read_buf = (uint8_t*)malloc(read_buf_size);
+
+    memset(alloc_map, 0, sizeof(ALLOC_MAP_SIZE / sizeof(uint8_t)));
+    res = f_lseek(&fil, META_OFFSET);
+    for (int i = 0; i < META_OFFSET / read_buf_size; i++) {
+        res = f_read(&fil, read_buf, read_buf_size, &read);
+        if (read != read_buf_size) {
+            ESP_LOGI(TAG, "f_read merely reads %u bytes", read);
+            // TODO fatal error
+            die_another_day();
+        } 
+
+        int buckets_per_buf = read_buf_size / BUCKET_SIZE;
+        for (int j = 0; j < buckets_per_buf ; j++) { 
+            uint16_t idx = i * buckets_per_buf + j;
+            uint8_t head[2];
+            head[0] = idx >> 4; // high 8 bit
+            head[1] = (idx & 0x0f) << 4; // low 4 bit shift to high
+        
+            siffs_metadata_bucket_t* buck = 
+                (siffs_metadata_bucket_t*)(&read_buf[j * BUCKET_SIZE]);
+            for (int k = 0; k < 32; k++) {
+                siffs_metadata_t* meta = &buck->meta[k];
+                if (meta->md5sum[0] == head[0] &&
+                    (meta->md5sum[1] & 0xf0) == head[1] &&
+                    meta->size != 0) {
+                    entries++;
+                    int sib = size_in_blocks(meta->size);
+                    assert(siffs_alloc(meta->blk_addr, sib)); // TODO conflict !!!
+                    used_blocks += sib;
+                }
+            } 
+        }
+
+        bucket_count += buckets_per_buf;
+    }
+
+    free(read_buf);
+
+    ESP_LOGI(TAG, "siffs file size %lluMiB", fno.fsize / 1024 / 1024, );
+    ESP_LOGI(TAG,
+             "%d metadata entries found in %d buckets. The size of bucket is "
+             "%d bytes. The size of each metadata entry is %d bytes.",
+             entries, bucket_count, BUCKET_SIZE, sizeof(siffs_metadata_t));
+
+    ESP_LOGI(TAG,
+             "%d blocks in total, %d blocks used, %d blocks free. The size "
+             "of each block is %d KiB",
+             (BLOCK_NUM_BOUND * BLOCK_NUM_FRACT), used_blocks,
+             ALLOC_MAP_SIZE - used_blocks, block_size / 1024);
 
     // initialize play_context_t objects
     play_context_queue = xQueueCreate(2, sizeof(play_context_t *));
@@ -340,23 +362,7 @@ void juggler(void *arg) {
             xQueueCreate(FETCH_INPUT_QUEUE_SIZE, sizeof(message_t));
     }
 
-    // currently, this only for *playing* file
-    FILE *fp;
-    fp = fopen(TEMP_FILE_PATH, "w");
-    if (!fp) {
-        ESP_LOGI(TAG, "failed to open (w) temp file (%d)", errno);
-    }
-
-    fclose(fp);
-
-    fp = fopen(TEMP_FILE_PATH, "r+");
-    if (!fp) {
-        ESP_LOGI(TAG, "failed to open (r+) temp file (%d)", errno);
-    }
-
-    // TODO
-    fseek(fp, 0L, SEEK_SET);
-
+    
     int file_written = 0;
     int file_read = 0;
 
@@ -431,8 +437,8 @@ void juggler(void *arg) {
             int length = msg.value.mem_block.length;
             fetch_context_t *ctx = msg.from;
 
-            fwrite(data, sizeof(char), length, fp);
-            fflush(fp);
+            // fwrite(data, sizeof(char), length, fp);
+            // fflush(fp);
             file_written += msg.value.mem_block.length;
 
             if (ctx->play_started == false) {
@@ -457,8 +463,8 @@ void juggler(void *arg) {
 
             if (length > 0) {
                 // TODO error
-                fwrite(data, sizeof(char), length, fp);
-                fflush(fp);
+                // fwrite(data, sizeof(char), length, fp);
+                // fflush(fp);
                 file_written += length;
 
                 if (ctx->play_started == false) {
@@ -479,18 +485,18 @@ void juggler(void *arg) {
             if (file_read < file_written) {
                 // read more data and send to audio_queue
 
-                assert(file_written == ftell(fp));
-
-                fseek(fp, file_read, SEEK_SET);
+                // assert(file_written == ftell(fp));
+                // fseek(fp, file_read, SEEK_SET);
                 int to_read = file_written - file_read;
                 if (to_read > MEM_BLOCK_SIZE)
                     to_read = MEM_BLOCK_SIZE;
 
                 char *data = msg.value.mem_block.data;
-                int length = fread(data, sizeof(char), to_read, fp);
+                // int length = fread(data, sizeof(char), to_read, fp);
+                int length = 0;
                 file_read += length;
 
-                fseek(fp, file_written, SEEK_SET);
+                // fseek(fp, file_written, SEEK_SET);
 
                 msg.type = MSG_AUDIO_DATA;
                 msg.from = NULL;

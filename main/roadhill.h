@@ -23,6 +23,31 @@
 #define PERIPH_CLOUD_CMD_STOP (3)
 #define PERIPH_CLOUD_CMD_TEST (0x7e57)
 
+#define MOUNT_POINT "/mmc"
+#define CHUNK_FILE_SIZE (1024 * 1024)
+#define TEMP_FILE_PATH "/mmc/temp"
+
+#define BLOCK_NUM_BOUND (16 * 8 * 1024)
+#define BLOCK_NUM_FRACT 7 / 8           // delibrately no parenthesis
+#define BUCKET_BITS (12)
+#define BUCKET_SIZE (1024)
+#define META_OFFSET (((uint64_t)1 << BUCKET_BITS) * BUCKET_SIZE) // 4MB
+#define DATA_OFFSET (META_OFFSET * 2)   // 8MB
+#define WLOG_OFFSET (META_OFFSET / 2)   // 2MB
+
+typedef struct __attribute__((packed)) {
+    uint8_t md5sum[16];
+    uint32_t size;
+    uint32_t access;
+    uint32_t blk_addr;
+    uint16_t hole_addr;
+    uint16_t hole_size;
+} siffs_metadata_t;
+
+typedef struct {
+    siffs_metadata_t meta[32];
+} siffs_metadata_bucket_t;
+
 typedef struct play_context play_context_t;
 typedef struct fetch_context fetch_context_t;
 
