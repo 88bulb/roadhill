@@ -217,7 +217,7 @@ STATE_INFO
 ```json
 {
     "api_version": 1,
-	"cmd": "PLAY",
+    "cmd": "PLAY",
     "*reply": "ERROR",
     "*reply_serial": 7625,
     "tracks_url": "http://10.42.0.1/files/album0001",
@@ -230,10 +230,10 @@ STATE_INFO
             "chan": 0,
         },
         {
-        	"name": "972f619d7f82864a3b11b0e7b37d993e",
+            "name": "972f619d7f82864a3b11b0e7b37d993e",
             "size": 4321,
             "start": 8000,
-            "dur"
+            "dur": 30000,
             "chan": 1
         }
     ],
