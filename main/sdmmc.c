@@ -41,7 +41,7 @@ static uint64_t siffs_file_size(DWORD fre_sect) {
                              BLOCK_NUM_FRACT;
 }
 
-static void sdmmc_card_info(const sdmmc_card_t *card) {
+void sdmmc_card_info(const sdmmc_card_t *card) {
     bool print_scr = true;
     bool print_csd = true;
     const char *type;
@@ -277,7 +277,7 @@ static esp_err_t
 mount_to_vfs_fat(const esp_vfs_fat_mount_config_t *mount_config,
                  sdmmc_card_t *card, uint8_t pdrv, const char *base_path) {
     esp_err_t err;
-    uint32_t fre_clust, fre_sect, tot_sect;
+    // uint32_t fre_clust, fre_sect, tot_sect;
 
     FRESULT fr;
     FILINFO fno;

@@ -50,6 +50,7 @@ typedef struct {
 
 typedef struct play_context play_context_t;
 typedef struct fetch_context fetch_context_t;
+typedef struct pacman_context pacman_context_t;
 
 extern QueueHandle_t play_context_queue;
 extern QueueHandle_t juggler_queue;
@@ -163,6 +164,12 @@ struct fetch_context {
     play_context_t *play_ctx;
 };
 
+/* use to initiate a pacman task */
+struct pacman_context {
+    FILE* in;
+    FILE* out;
+};
+
 /**
  * A play may or may not have tracks (may be lighting only);
  * A play may or may not have blinks (may be music only);
@@ -216,5 +223,46 @@ typedef struct {
     int blinks_array_size;
     int chunk_index;
 } chunk_data_t;
+
+/****************************
+
+Disk Format ver 1
+
+first, calculate metadata table size:
+
+4096 buckets in total, each bucket has 1024 bytes, thus 4MB for metadata table.
+
+each record has 64 byte, thus each bucket has 1024 / 64 = 16 records. So if all
+buckets are full, there are 4096 * 16 = 64KB records. For a 128GB mmc, if all
+file sizes are equal, then each file has roughly 2MB. In reality, most mp3 file
+will be several metabytes and pcm files will be tens of metabytes. So the bucket
+number and record in buckets are enough, as estimated.
+
+Layout:
+
+|--------|--------|=-=-=-=-=-=-=||
+|        |xxxxxxxx|             ||
+         4M       8M            64M
+
+metadata table @4MB
+header @0B and @512KB
+
+write log is dual buckets, 2 * 1024 in size. @1M
+
+header describes:
+
+1. magic
+2. version (single uint32_t)
+3. secondary header location
+4. buckets:
+    1. size
+    2. number of buckets
+    3. where starts 
+5. writelog offset (twice the size of a bucket)
+6. data
+    1. starts
+    2. block size
+
+*****************************/
 
 

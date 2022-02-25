@@ -9,6 +9,7 @@
 
 #include "driver/sdmmc_defs.h"
 #include "driver/sdmmc_host.h"
+#include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
 
 #include "esp_http_client.h"
@@ -18,8 +19,11 @@
 #define FETCH_INPUT_QUEUE_SIZE (4)
 
 #define ALLOC_MAP_SIZE (BLOCK_NUM_BOUND * BLOCK_NUM_FRACT)
+
+extern void pacman(void* arg);
+
 // uint8_t alloc_map[ALLOC_MAP_SIZE / sizeof(uint8_t)] = {};
-uint8_t* alloc_map = NULL;
+uint8_t *alloc_map = NULL;
 
 int block_size = 0;
 
@@ -28,8 +32,9 @@ int size_in_blocks(uint32_t size) {
 }
 
 bool siffs_alloc(uint32_t blk_addr, int bits) {
-    if (blk_addr + bits > ALLOC_MAP_SIZE) return false;
-    
+    if (blk_addr + bits > ALLOC_MAP_SIZE)
+        return false;
+
     for (uint32_t addr = blk_addr; addr < blk_addr + bits; addr++) {
         if (alloc_map[addr / 8] & (1 << (addr % 8)))
             return false;
@@ -236,6 +241,8 @@ void die_another_day() {
     esp_restart();
 }
 
+void sdmmc_card_info(const sdmmc_card_t *card);
+
 /**
  * juggler task
  */
@@ -243,14 +250,63 @@ void juggler(void *arg) {
     const char *TAG = "juggler";
     esp_err_t err;
     message_t msg;
-
+/**
     ESP_LOGI(TAG, "preparing mmc card...");
- 
+
+    sdmmc_card_t card;
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.width = 1;
+
+    sdmmc_host_init();
+    sdmmc_host_init_slot(SDMMC_HOST_SLOT_1, &slot_config);
+    sdmmc_card_init(&host, &card);
+
+    sdmmc_card_info(&card);
+
+    int64_t before_time = esp_timer_get_time();
+    char *buf = (char *)heap_caps_malloc(16 * 1024, MALLOC_CAP_DMA);
+
+    if (buf == NULL) {
+        ESP_LOGW(TAG, "heap_cap_malloc failed");
+    }
+
+    memset(buf, 0, 16 * 1024);
+    for (int i = 0; i < 1024; i++) {
+        sdmmc_write_sectors(&card, buf, i * 32 + 4096, 32);
+    }
+
+    ESP_LOGI(TAG, "direct sdmmc write 16MB consumes: %lld ms",
+             (esp_timer_get_time() - before_time) / 1024);
+
+    vTaskDelay(portMAX_DELAY);
+*/
+
     err = init_mmc();
     if (err) {
         ESP_LOGW(TAG, "failed to initialize mmc card");
         die_another_day();
     }
+
+//    vTaskDelay(portMAX_DELAY);
+
+    FILE* in = fopen("/mmc/source.mp3", "r");
+    if (in == NULL) {
+        ESP_LOGW(TAG, "failed to open /mmc/source.mp3");
+    }
+
+    FILE* out = fopen("/mmc/raw.pcm", "w");
+
+    pacman_context_t pacman_ctx = {
+        .in = in,
+        .out = out,
+    };
+
+    xTaskCreate(pacman, "pacman", 4096, &pacman_ctx, 15, NULL); 
+
+    vTaskDelay(portMAX_DELAY);
 
     // uint16_t fre_clust;
     // f_getfree("0:", &fre_clust, NULL);
@@ -275,14 +331,14 @@ void juggler(void *arg) {
         die_another_day();
     }
 
-    alloc_map = (uint8_t*)malloc(ALLOC_MAP_SIZE / sizeof(uint8_t));
+    alloc_map = (uint8_t *)malloc(ALLOC_MAP_SIZE / sizeof(uint8_t));
 
     unsigned int read;
     int entries = 0;
     int used_blocks = 0;
     int bucket_count = 0;
     int read_buf_size = 16 * 1024;
-    uint8_t *read_buf = (uint8_t*)malloc(read_buf_size);
+    uint8_t *read_buf = (uint8_t *)malloc(read_buf_size);
 
     memset(alloc_map, 0, sizeof(ALLOC_MAP_SIZE / sizeof(uint8_t)));
     res = f_lseek(&fil, META_OFFSET);
@@ -292,28 +348,28 @@ void juggler(void *arg) {
             ESP_LOGI(TAG, "f_read merely reads %u bytes", read);
             // TODO fatal error
             die_another_day();
-        } 
+        }
 
         int buckets_per_buf = read_buf_size / BUCKET_SIZE;
-        for (int j = 0; j < buckets_per_buf ; j++) { 
+        for (int j = 0; j < buckets_per_buf; j++) {
             uint16_t idx = i * buckets_per_buf + j;
             uint8_t head[2];
-            head[0] = idx >> 4; // high 8 bit
+            head[0] = idx >> 4;          // high 8 bit
             head[1] = (idx & 0x0f) << 4; // low 4 bit shift to high
-        
-            siffs_metadata_bucket_t* buck = 
-                (siffs_metadata_bucket_t*)(&read_buf[j * BUCKET_SIZE]);
+
+            siffs_metadata_bucket_t *buck =
+                (siffs_metadata_bucket_t *)(&read_buf[j * BUCKET_SIZE]);
             for (int k = 0; k < 32; k++) {
-                siffs_metadata_t* meta = &buck->meta[k];
+                siffs_metadata_t *meta = &buck->meta[k];
                 if (meta->md5sum[0] == head[0] &&
-                    (meta->md5sum[1] & 0xf0) == head[1] &&
-                    meta->size != 0) {
+                    (meta->md5sum[1] & 0xf0) == head[1] && meta->size != 0) {
                     entries++;
                     int sib = size_in_blocks(meta->size);
-                    assert(siffs_alloc(meta->blk_addr, sib)); // TODO conflict !!!
+                    assert(
+                        siffs_alloc(meta->blk_addr, sib)); // TODO conflict !!!
                     used_blocks += sib;
                 }
-            } 
+            }
         }
 
         bucket_count += buckets_per_buf;
@@ -321,7 +377,8 @@ void juggler(void *arg) {
 
     free(read_buf);
 
-    ESP_LOGI(TAG, "siffs file size %lluMiB", fno.fsize / 1024 / 1024, );
+    // TODO freespace
+    ESP_LOGI(TAG, "siffs file size %lluMiB", fno.fsize / 1024 / 1024);
     ESP_LOGI(TAG,
              "%d metadata entries found in %d buckets. The size of bucket is "
              "%d bytes. The size of each metadata entry is %d bytes.",
@@ -362,7 +419,6 @@ void juggler(void *arg) {
             xQueueCreate(FETCH_INPUT_QUEUE_SIZE, sizeof(message_t));
     }
 
-    
     int file_written = 0;
     int file_read = 0;
 

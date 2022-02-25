@@ -755,10 +755,6 @@ void app_main(void) {
         ESP_LOGI(TAG, "failed to create juggler task for memory constraint");
     }
 
-    xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
-    xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
-    xTaskCreatePinnedToCore(audible, "audible", 4096, NULL, 18, NULL, 1);
-
     // init nvs
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
@@ -767,6 +763,10 @@ void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
+
+    xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
+    xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
+    xTaskCreatePinnedToCore(audible, "audible", 4096, NULL, 18, NULL, 1);
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
