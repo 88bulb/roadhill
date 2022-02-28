@@ -13,7 +13,6 @@
 #include "audio_event_iface.h"
 #include "audio_mem.h"
 #include "audio_common.h"
-#include "ringbuf.h"
 #include "mp3_decoder.h"
 #include "filter_resample.h"
 
@@ -25,22 +24,6 @@
 
 static const char *TAG = "pacman";
 
-// code from ringbuf.c
-struct ringbuf {
-    char *p_o;                  /**< Original pointer */
-    char *volatile p_r;         /**< Read pointer */
-    char *volatile p_w;         /**< Write pointer */
-    volatile uint32_t fill_cnt; /**< Number of filled slots */
-    uint32_t size;              /**< Buffer size */
-    SemaphoreHandle_t can_read;
-    SemaphoreHandle_t can_write;
-    SemaphoreHandle_t lock;
-    bool abort_read;
-    bool abort_write;
-    bool is_done_write;       /**< To signal that we are done writing */
-    bool unblock_reader_flag; /**< To unblock instantly from rb_read */
-};
-
 /*
  *
  */
@@ -51,7 +34,6 @@ typedef enum {
 
 static pacman_state_t state = PCM_STOPPED;
 
-
 static char* read_buf = NULL;
 static int read_buf_len = 0;
 static int read_buf_pos = -1;
@@ -60,8 +42,7 @@ static int total_read = 0;
 /*
  * read data from in queue
  */
-static int mp3_read_cb(audio_element_handle_t el, char *buf, int len,
-                       TickType_t wait_time, void *ctx) {
+static int mp3_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx) {
 
     QueueHandle_t in = ((pacman_context_t *)ctx)->in;
     pacman_inmsg_t msg;
@@ -102,9 +83,10 @@ static int write_buf_pos = -1;
 static int total_written = 0;
 static int64_t total_written_time = 0;
 
-static int rsp_write_cb(audio_element_handle_t el, char *buf, int len,
-                        TickType_t wait_time, void *ctx) {
-
+/*
+ * write given data to mem block and send to out queue when full.
+ */
+static int rsp_write_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx) {
     if (write_buf == NULL) {
         write_buf = (char *)malloc(WRITE_BUF_SIZE);
         memcpy(write_buf, buf, len);
@@ -140,16 +122,10 @@ static int rsp_write_cb(audio_element_handle_t el, char *buf, int len,
 
 /** pacman is a pun for pcm */
 void pacman(void *ctx) {
-    read_buf = (char*)heap_caps_malloc(READ_BUF_SIZE, MALLOC_CAP_DMA);
-//    read_buf = (char*)malloc(READ_BUF_SIZE);
-    assert(read_buf);
-
-//    write_buf = (char*)heap_caps_malloc(WRITE_BUF_SIZE, MALLOC_CAP_DMA);
-//    assert(write_buf);
-
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     audio_pipeline_handle_t pipeline = audio_pipeline_init(&pipeline_cfg);
     mem_assert(pipeline);
+
     /**********************************************************
       #define MP3_DECODER_TASK_STACK_SIZE     (5 * 1024)
       #define MP3_DECODER_TASK_CORE           (0)
@@ -200,7 +176,6 @@ void pacman(void *ctx) {
     */
     rsp_filter_cfg_t rsp_cfg = DEFAULT_RESAMPLE_FILTER_CONFIG();
     // rsp_cfg.prefer_flag = ESP_RSP_PREFER_TYPE_MEMORY;
-
     rsp_cfg.task_core = 1;
     rsp_cfg.task_prio = 18;
     rsp_cfg.complexity = 5;
@@ -230,6 +205,11 @@ void pacman(void *ctx) {
             continue;
         }
 
+/**
+        if (msg.source_type == AUDIO_ELEMENT_TYPE_UNKNOW) {
+            audio_pipeline_run(p 
+        }
+*/
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT &&
             msg.source == (void *)mp3_decoder &&
             msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
@@ -265,7 +245,8 @@ void pacman(void *ctx) {
                  * ESP_LOGI(TAG, "totally written %d bytes, total
                  * written time: %lld", total_written, total_written_time);
                  */
-                break;
+
+                audio_pipeline_run(pipeline);
             }
         }
     }
@@ -282,8 +263,5 @@ void pacman(void *ctx) {
 
     // audio_event_iface_remove_listener(???)
     audio_event_iface_destroy(evt);
-
-    ESP_LOGI(TAG, "task terminates");
-
-    vTaskDelete(NULL);
 }
+

@@ -21,6 +21,7 @@
 #define ALLOC_MAP_SIZE (BLOCK_NUM_BOUND * BLOCK_NUM_FRACT)
 
 extern void pacman(void* arg);
+extern void picman(void* arg);
 
 // uint8_t alloc_map[ALLOC_MAP_SIZE / sizeof(uint8_t)] = {};
 uint8_t *alloc_map = NULL;
@@ -254,12 +255,19 @@ void juggler(void *arg) {
         .out = pcm_out,
     };
 
-    xTaskCreate(pacman, "pacman", 4096, &pacman_ctx, 15, NULL); 
+    xTaskCreate(pacman, "pacman", 4096, &pacman_ctx, 11, NULL); 
+
+    QueueHandle_t pic_in = xQueueCreate(8, sizeof(picman_inmsg_handle_t));
+    QueueHandle_t pic_out = xQueueCreate(8, sizeof(picman_outmsg_t));
+    picman_context_t picman_ct = {
+        .in = pic_in,
+        .out = pic_out,
+    };
+
+    xTaskCreate(picman, "picman", 4096, &picman_ct, 12, NULL);
 
     vTaskDelay(portMAX_DELAY);
 
-    // uint16_t fre_clust;
-    // f_getfree("0:", &fre_clust, NULL);
 
     FILINFO fno;
     FRESULT res = f_stat("siffs", &fno);

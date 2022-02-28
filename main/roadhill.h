@@ -11,6 +11,8 @@
 // used by mem_block_t
 #define MEM_BLOCK_SIZE (32768)
 
+#define PIC_BLOCK_SIZE (16 * 1024)
+
 #define container_of(ptr, type, member)                                        \
     ({                                                                         \
         const typeof(((type *)0)->member) *__mptr = (ptr);                     \
@@ -18,6 +20,7 @@
     })
 
 #define PERIPH_ID_CLOUD (AUDIO_ELEMENT_TYPE_PERIPH + 0xc1)
+#define PERIPH_ID_JUGGLER (AUDIO_ELEMENT_TYPE_PERIPH + 0xc2)
 
 #define PERIPH_CLOUD_CMD_OTA (0)
 #define PERIPH_CLOUD_CMD_CONFIG (1)
@@ -53,6 +56,7 @@ typedef struct {
 typedef struct play_context play_context_t;
 typedef struct fetch_context fetch_context_t;
 typedef struct pacman_context pacman_context_t;
+typedef struct picman_context picman_context_t;
 
 extern QueueHandle_t play_context_queue;
 extern QueueHandle_t juggler_queue;
@@ -165,6 +169,24 @@ struct fetch_context {
 
     play_context_t *play_ctx;
 };
+
+struct picman_context {
+    QueueHandle_t in;
+    QueueHandle_t out;
+};
+
+typedef struct {
+    char url[URL_BUFFER_SIZE];
+    md5_digest_t digest;
+    int track_size;
+} picman_inmsg_data_t;
+
+typedef picman_inmsg_data_t* picman_inmsg_handle_t;
+
+typedef struct {
+    char* data;
+    int size_or_error;
+} picman_outmsg_t;
 
 /* use to initiate a pacman task */
 struct pacman_context {
