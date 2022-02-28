@@ -1,2 +1,0 @@
-
-void player_task
