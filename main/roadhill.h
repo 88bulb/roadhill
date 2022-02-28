@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stddef.h>
+#include <assert.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -166,9 +168,31 @@ struct fetch_context {
 
 /* use to initiate a pacman task */
 struct pacman_context {
-    FILE* in;
-    FILE* out;
+    QueueHandle_t in;
+    QueueHandle_t out;
 };
+
+typedef enum {
+    MP3_STREAM_START,
+    MP3_STREAM_WRITE,
+    MP3_STREAM_END,
+} pacman_inmsg_type_t;
+
+typedef struct {
+    char *data;
+    uint32_t len;
+} pacman_inmsg_t;
+
+typedef enum {
+    PCM_STREAM_DATA,
+    PCM_STREAM_ERROR,
+    PCM_STREAM_FINISH
+} pacman_outmsg_type_t;
+
+typedef struct {
+    char *data;
+    uint32_t len;
+} pacman_outmsg_t;
 
 /**
  * A play may or may not have tracks (may be lighting only);
@@ -224,6 +248,7 @@ typedef struct {
     int chunk_index;
 } chunk_data_t;
 
+
 /****************************
 
 Disk Format ver 1
@@ -244,6 +269,12 @@ Layout:
 |        |xxxxxxxx|             ||
          4M       8M            64M
 
+@512KB      header, 1024 bytes, with last 16 bytes as md5
+@1MB-2KB    writelog, 2048 bytes, dual bucket
+@4MB        4 megabytes, include 4096 buckets, each bucket has
+            16 records, each record has 64 bytes.
+@64MB       data block starts
+
 metadata table @4MB
 header @0B and @512KB
 
@@ -253,7 +284,7 @@ header describes:
 
 1. magic
 2. version (single uint32_t)
-3. secondary header location
+3. secondary header location (no, last 2 sectors)
 4. buckets:
     1. size
     2. number of buckets
@@ -264,5 +295,107 @@ header describes:
     2. block size
 
 *****************************/
+
+#define MMCFS_MAX_BITARRAY_SIZE (16 * 1024 * 8)
+
+typedef struct {
+    uint64_t log_start;
+    uint64_t log_sect;      // twice bucket_sect
+    uint64_t bucket_start;
+    uint64_t bucket_sect;
+    uint64_t bucket_count;
+    uint64_t block_start;
+    uint64_t block_sect;
+    uint64_t block_count;
+} mmcfs_t;
+
+// superblock is located at sector 2 (aka, 1024 bytes)
+typedef struct __attribute__((packed)) {
+    uint8_t magic[16];
+    uint64_t version;
+    mmcfs_t mmcfs;
+    uint8_t zero_padding[512 - 16 * 2 - sizeof(uint64_t) - sizeof(mmcfs_t)];
+    uint8_t md5[16];
+} mmcfs_superblock_t;
+
+_Static_assert(sizeof(mmcfs_superblock_t) == 512,
+               "mmc_superblock_t size incorrect");
+
+/**
+ * 4G   -> 32KiB    * 64k = 2GB
+ * 8G   -> 64KiB    * 64K = 4GB
+ * 16G  -> 128KiB   * 64K = 8GB
+ * 32G  -> 256KiB   * 64K = 16GB
+ * 64G  -> 512KiB
+ * 128G -> 1MiB
+ * 256G -> 2MiB
+ * 512G -> 4MiB
+ * 1T   -> 8MiB
+ * 2T   -> 16MiB
+ * 4T   -> 32MiB
+ * 8T   -> 64MiB    * 64K = 4TB
+ */
+
+/**
+ * There may be three TYPEs of file.
+ * 1. original mp3 file. 
+ *      with or without link
+ *      data type: stream
+ *      data_size
+ *      block_start
+ * 2. original mp3 file, pure link, no data (not supported now)
+ *      must have a link
+ 8      no data
+ * 3. pcm file, with oob data
+ *      must have a link
+ *      data_size
+ *      data type: packet
+ *      packet_size: 16K
+ *      packet_data: 15K
+ *      packet_position: first or last
+ */
+typedef struct __attribute__((packed)) {
+    // for
+    uint8_t self[16];
+
+    // for mp3 file, this links to pcm;
+    // for pcm file, this links to original mp3 file.
+    // there is no need to have an "option field" denoting
+    // whether this link is used or not, since a "danling"
+    // reference is allowed.
+    uint8_t link[16];
+
+    // access is a global monotonously increasing number
+    // it is roughly equivalent to last access time, the larger, the latter
+    uint32_t access;
+
+    // starting block, relative to fs->block_start, in block unit (not sector)
+    // start is inclusive and end is exclusive
+    uint32_t block_start;
+    uint32_t block_end;
+
+    // in byte
+    // arbitrary non-zero value for mp3
+    // must be multiple of (pcm + oob) * 512 for pcm
+    uint32_t size;
+
+    //
+    uint16_t type; // 0 for unused, 1 for mp3, 2 for pcm
+
+    // for mp3, both are zero
+    // for pcm, pcm is modelled as a packet stream, not a 
+    uint8_t pcm_sect;
+    uint8_t oob_sect;  
+
+    uint32_t zero[3];
+} mmcfs_file_t;
+
+_Static_assert(sizeof(mmcfs_file_t) == 64, "mmc_file_t size incorrect");
+
+typedef struct {
+  mmcfs_file_t files[16];
+} mmcfs_bucket_t;
+
+_Static_assert(sizeof(mmcfs_bucket_t) == 1024, "mmc_bucket_t size incorrect");
 
 

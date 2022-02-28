@@ -41,66 +41,105 @@ struct ringbuf {
     bool unblock_reader_flag; /**< To unblock instantly from rb_read */
 };
 
+/*
+ *
+ */
+typedef enum {
+    PCM_STARTED,
+    PCM_STOPPED
+} pacman_state_t;
+
+static pacman_state_t state = PCM_STOPPED;
+
+
 static char* read_buf = NULL;
 static int read_buf_len = 0;
-static int read_buf_pos = 0;
+static int read_buf_pos = -1;
 static int total_read = 0;
 
+/*
+ * read data from in queue
+ */
 static int mp3_read_cb(audio_element_handle_t el, char *buf, int len,
                        TickType_t wait_time, void *ctx) {
 
-    FILE *fp = ((pacman_context_t *)ctx)->in;
-    if (read_buf_len == read_buf_pos) {
-        if (feof(fp)) {
-            fclose(fp);
+    QueueHandle_t in = ((pacman_context_t *)ctx)->in;
+    pacman_inmsg_t msg;
+
+    while (read_buf == NULL) {
+        if (pdTRUE != xQueueReceive(in, &msg, portMAX_DELAY)) {
+            continue;
+        }
+
+        // null-terminator
+        if (msg.data == NULL) {
             return 0;
         }
-        read_buf_len = fread(read_buf, 1, READ_BUF_SIZE, fp);
-        total_read += read_buf_len;
-        read_buf_pos = 0; 
+
+        read_buf = msg.data;
+        read_buf_len = msg.len;
+        read_buf_pos = 0;
     }
 
-    if (len < read_buf_len - read_buf_pos) {
+    int left = read_buf_len - read_buf_pos;
+    if (len < left) {
         memcpy(buf, &read_buf[read_buf_pos], len);
-        read_buf_pos += len;
+        read_buf_pos++;
         return len;
     } else {
-        int l = read_buf_len - read_buf_pos;
-        memcpy(buf, &read_buf[read_buf_pos], l);
-        read_buf_pos = read_buf_len;
-        return l;
+        memcpy(buf, &read_buf[read_buf_pos], left);
+        free(read_buf);
+        read_buf = NULL;
+        read_buf_pos = -1;
+        return left;
     }
 }
 
+#define WRITE_BUF_SIZE (16 * 1024)
+
 static char *write_buf = NULL;
-static int write_buf_pos = 0;
+static int write_buf_pos = -1;
 static int total_written = 0;
 static int64_t total_written_time = 0;
 
 static int rsp_write_cb(audio_element_handle_t el, char *buf, int len,
                         TickType_t wait_time, void *ctx) {
 
-    return len;
-/*
-    FILE *fp = ((pacman_context_t *)ctx)->out;
-    if (write_buf_pos + len > WRITE_BUF_SIZE) {
-        int64_t before = esp_timer_get_time();
-        fwrite(write_buf, 1, write_buf_pos, fp);
-        total_written += write_buf_pos;
-        int64_t after = esp_timer_get_time();
-        total_written_time += after - before;
-        write_buf_pos = 0;
+    if (write_buf == NULL) {
+        write_buf = (char *)malloc(WRITE_BUF_SIZE);
+        memcpy(write_buf, buf, len);
+        write_buf_pos = len;
+    } else {
+        int remain = WRITE_BUF_SIZE - write_buf_pos;
+        if (len < remain) {
+            memcpy(&write_buf[write_buf_pos], buf, len);
+            write_buf_pos += len;
+        } else {
+            memcpy(&write_buf[write_buf_pos], buf, remain);
+            /*
+             * write_buf_pos += remain
+             * so, write_buf_pos = WRITE_BUF_SIZE - write_buf_pos +
+             * write_buf_pos so, write_buf_pos = WRITE_BUF_SIZE so, write_buf is
+             * full
+             */
+            QueueHandle_t out = ((pacman_context_t *)ctx)->out;
+            pacman_outmsg_t msg = {.data = write_buf, .len = WRITE_BUF_SIZE};
+            xQueueSend(out, &msg, portMAX_DELAY);
+            write_buf = NULL;
+            write_buf_pos = -1;
+
+            if (len > remain) {
+                write_buf = (char *)malloc(WRITE_BUF_SIZE);
+                memcpy(write_buf, &buf[remain], len - remain);
+                write_buf_pos = len - remain;
+            }
+        }
     }
-    memcpy(&write_buf[write_buf_pos], buf, len);
-    write_buf_pos += len;
     return len;
-*/
 }
 
 /** pacman is a pun for pcm */
 void pacman(void *ctx) {
-    ringbuf_handle_t mp3_in, mp3_out, rsp_in, rsp_out;
-
     read_buf = (char*)heap_caps_malloc(READ_BUF_SIZE, MALLOC_CAP_DMA);
 //    read_buf = (char*)malloc(READ_BUF_SIZE);
     assert(read_buf);
@@ -161,6 +200,7 @@ void pacman(void *ctx) {
     */
     rsp_filter_cfg_t rsp_cfg = DEFAULT_RESAMPLE_FILTER_CONFIG();
     // rsp_cfg.prefer_flag = ESP_RSP_PREFER_TYPE_MEMORY;
+
     rsp_cfg.task_core = 1;
     rsp_cfg.task_prio = 18;
     rsp_cfg.complexity = 5;
@@ -169,8 +209,6 @@ void pacman(void *ctx) {
     rsp_cfg.dest_ch = 2;
     audio_element_handle_t rsp_filter = rsp_filter_init(&rsp_cfg);
     audio_element_set_write_cb(rsp_filter, rsp_write_cb, ctx);
-    rsp_in = audio_element_get_input_ringbuf(rsp_filter);
-    rsp_out = audio_element_get_output_ringbuf(rsp_filter);
     
     audio_pipeline_register(pipeline, mp3_decoder, "pacman_mp3");
     audio_pipeline_register(pipeline, rsp_filter, "pacman_rsp");
@@ -184,38 +222,6 @@ void pacman(void *ctx) {
     audio_pipeline_set_listener(pipeline, evt);
 
     audio_pipeline_run(pipeline);
-
-    mp3_in = audio_element_get_input_ringbuf(mp3_decoder);
-    if (mp3_in == NULL) {
-        ESP_LOGI(TAG, "mp3_decoder input ringbuf is NULL");
-    } else {
-        ESP_LOGI(TAG, "mp3_decoder input ringbuf @%08x, rb->buf (po) @%08x",
-            (uint32_t)mp3_in, (uint32_t)(mp3_in->p_o));
-    }
-
-    mp3_out = audio_element_get_output_ringbuf(mp3_decoder);
-    if (mp3_out == NULL) {
-        ESP_LOGI(TAG, "mp3_decoder output ringbuf is NULL");
-    } else {
-        ESP_LOGI(TAG, "mp3_decoder output ringbuf @%08x, rb->buf (po) @%08x",
-            (uint32_t)mp3_out, (uint32_t)(mp3_out->p_o));
-    }
-
-    rsp_in = audio_element_get_input_ringbuf(rsp_filter);
-    if (rsp_in == NULL) {
-        ESP_LOGI(TAG, "rsp_filter input ringbuf is NULL");
-    } else {
-        ESP_LOGI(TAG, "rsp_filter input ringbuf @%08x, rb->buf (po) @%08x",
-            (uint32_t)rsp_in, (uint32_t)(rsp_in->p_o));
-    }
-
-    rsp_out = audio_element_get_output_ringbuf(rsp_filter);
-    if (rsp_out == NULL) {
-        ESP_LOGI(TAG, "rsp_filter output ringbuf is NULL");
-    } else {
-        ESP_LOGI(TAG, "rsp_filter output ringbuf @%08x, rb->buf (po) @%08x",
-            (uint32_t)rsp_out, (uint32_t)(rsp_out->p_o));
-    }
 
     while (1) {
         audio_event_iface_msg_t msg;
@@ -235,7 +241,6 @@ void pacman(void *ctx) {
                 music_info.sample_rates, music_info.bits, music_info.channels);
             rsp_filter_set_src_info(rsp_filter, music_info.sample_rates,
                                     music_info.channels);
-            // audio_element_setinfo(rsp_filter, &music_info);
         }
 
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT &&
@@ -245,20 +250,21 @@ void pacman(void *ctx) {
                 ESP_LOGI(TAG, "mp3_decoder finished");
             } else if ((void *)msg.source == rsp_filter) {
                 ESP_LOGI(TAG, "rsp_filter finished");
-                FILE *fp = ((pacman_context_t *)ctx)->out;
-/*
-                if (write_buf_pos) {
-                    int64_t before = esp_timer_get_time();
-                    fwrite(write_buf, 1, write_buf_pos, fp);
-                    total_written += write_buf_pos;
-                    int64_t after = esp_timer_get_time();
-                    total_written_time += after - before;
+                QueueHandle_t out = ((pacman_context_t *)ctx)->out;
+                pacman_outmsg_t msg = {.data = write_buf, .len = write_buf_pos};
+                xQueueSend(out, &msg, portMAX_DELAY);
+                if (write_buf != NULL) {
+                    write_buf = NULL;
+                    write_buf_pos = -1;
+                    msg.data = write_buf;
+                    msg.len = write_buf_pos;
+                    xQueueSend(out, &msg, portMAX_DELAY);
                 }
-*/
-                fclose(fp);
-                ESP_LOGI(TAG,
-                         "totally written %d bytes, total written time: %lld",
-                         total_written, total_written_time);
+
+                /*
+                 * ESP_LOGI(TAG, "totally written %d bytes, total
+                 * written time: %lld", total_written, total_written_time);
+                 */
                 break;
             }
         }

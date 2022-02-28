@@ -27,6 +27,13 @@ uint8_t *alloc_map = NULL;
 
 int block_size = 0;
 
+// this is a thread-safe resource queue
+QueueHandle_t play_context_queue;
+// this is a messaging queue
+QueueHandle_t juggler_queue;
+
+extern esp_err_t init_mmcfs();
+
 int size_in_blocks(uint32_t size) {
     return size / block_size + (size % block_size) ? 1 : 0;
 }
@@ -45,21 +52,6 @@ bool siffs_alloc(uint32_t blk_addr, int bits) {
     }
     return true;
 }
-
-// defined in sdmmc
-/*
-extern esp_err_t esp_vfs_exfat_sdmmc_mount(
-    const char *base_path, const sdmmc_host_t *host_config,
-    const void *slot_config, const esp_vfs_fat_mount_config_t *mount_config,
-    sdmmc_card_t **out_card);
-*/
-
-extern esp_err_t init_mmc();
-
-// this is a thread-safe resource queue
-QueueHandle_t play_context_queue;
-// this is a messaging queue
-QueueHandle_t juggler_queue;
 
 void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
     char str[40] = {0};
@@ -241,8 +233,6 @@ void die_another_day() {
     esp_restart();
 }
 
-void sdmmc_card_info(const sdmmc_card_t *card);
-
 /**
  * juggler task
  */
@@ -250,58 +240,18 @@ void juggler(void *arg) {
     const char *TAG = "juggler";
     esp_err_t err;
     message_t msg;
-/**
-    ESP_LOGI(TAG, "preparing mmc card...");
 
-    sdmmc_card_t card;
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
-
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot_config.width = 1;
-
-    sdmmc_host_init();
-    sdmmc_host_init_slot(SDMMC_HOST_SLOT_1, &slot_config);
-    sdmmc_card_init(&host, &card);
-
-    sdmmc_card_info(&card);
-
-    int64_t before_time = esp_timer_get_time();
-    char *buf = (char *)heap_caps_malloc(16 * 1024, MALLOC_CAP_DMA);
-
-    if (buf == NULL) {
-        ESP_LOGW(TAG, "heap_cap_malloc failed");
-    }
-
-    memset(buf, 0, 16 * 1024);
-    for (int i = 0; i < 1024; i++) {
-        sdmmc_write_sectors(&card, buf, i * 32 + 4096, 32);
-    }
-
-    ESP_LOGI(TAG, "direct sdmmc write 16MB consumes: %lld ms",
-             (esp_timer_get_time() - before_time) / 1024);
-
-    vTaskDelay(portMAX_DELAY);
-*/
-
-    err = init_mmc();
+    err = init_mmcfs();
     if (err) {
-        ESP_LOGW(TAG, "failed to initialize mmc card");
+        ESP_LOGW(TAG, "failed to initialize mmcfs");
         die_another_day();
     }
 
-//    vTaskDelay(portMAX_DELAY);
-
-    FILE* in = fopen("/mmc/source.mp3", "r");
-    if (in == NULL) {
-        ESP_LOGW(TAG, "failed to open /mmc/source.mp3");
-    }
-
-    FILE* out = fopen("/mmc/raw.pcm", "w");
-
+    QueueHandle_t pcm_in = xQueueCreate(8, sizeof(pacman_inmsg_t));
+    QueueHandle_t pcm_out = xQueueCreate(8, sizeof(pacman_outmsg_t)); 
     pacman_context_t pacman_ctx = {
-        .in = in,
-        .out = out,
+        .in = pcm_in,
+        .out = pcm_out,
     };
 
     xTaskCreate(pacman, "pacman", 4096, &pacman_ctx, 15, NULL); 

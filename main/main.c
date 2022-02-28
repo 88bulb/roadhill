@@ -748,12 +748,8 @@ void app_main(void) {
     audio_queue = xQueueCreate(8, sizeof(message_t));
     juggler_queue = xQueueCreate(8, sizeof(message_t));
 
-    xTaskCreate(http_ota, "http_ota", 16384, NULL, 11, NULL);
-
-    if (errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY ==
-        xTaskCreate(juggler, "juggler", 16384, NULL, 11, NULL)) {
-        ESP_LOGI(TAG, "failed to create juggler task for memory constraint");
-    }
+    xTaskCreate(http_ota, "http_ota", 8192, NULL, 11, NULL);
+    xTaskCreate(juggler, "juggler", 8192, NULL, 11, NULL);
 
     // init nvs
     err = nvs_flash_init();
