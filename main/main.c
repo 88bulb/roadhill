@@ -33,8 +33,9 @@
 
 #define TCP_PORT (6015)
 
-extern void audible(void *arg);
+extern void player(void *arg);
 extern void juggler(void *arg);
+
 extern esp_err_t periph_cloud_send_event(int cmd, void *data, int data_len);
 
 static uint32_t play_index = 0;
@@ -102,8 +103,6 @@ typedef enum {
 } command_type_t;
 
 static ota_command_data_t *ota_command_data = NULL;
-
-typedef enum { BULB_NOTFOUND = 0, BULB_INVITING, BULB_READY } bulb_state_t;
 
 static bool is_semver(const char *str) {
     if (strlen(str) != 8)
@@ -289,6 +288,9 @@ static int process_line() {
         ESP_LOGI(TAG, "ota request queued, url: %s", url);
 
     } else if (0 == strcmp(cmd, "PLAY")) {
+
+        // TODO check invalid state
+
         cJSON *tracks = NULL;
         int tracks_array_size = 0;
         track_t *_tracks = NULL;
@@ -358,6 +360,19 @@ static int process_line() {
                     ESP_LOGI(TAG, "track[%d] size is not a number", i);
                     goto finish;
                 }
+
+                cJSON *position = cJSON_GetObjectItem(item, "position");
+                if (!cJSON_IsNumber(position)) {
+                    err = -1;
+                    ESP_LOGI(TAG, "track[%d] start not a number", i);
+                    goto finish;
+                }
+
+                cJSON *begin = cJSON_GetObjectItem(item, "begin");
+                if (!cJSON_IsNumber(begin)) {
+                }
+
+    
             }
         }
 
@@ -419,18 +434,10 @@ static int process_line() {
             goto finish;
         }
 
-        /** now let allocate memory */
-        p = (play_context_t *)malloc(sizeof(play_context_t));
-        if (p == NULL) {
-            err = -1;
-            ESP_LOGI(TAG, "failed to allocate memory for play_context");
-            goto finish;
-        }
 
         if (tracks_array_size) {
             _tracks = (track_t *)malloc(tracks_array_size * sizeof(track_t));
             if (_tracks == NULL) {
-                free(p);
                 err = -1;
                 ESP_LOGI(TAG, "failed to allocate memory for tracks");
                 goto finish;
@@ -438,7 +445,6 @@ static int process_line() {
 
             _tracks_url = (char *)malloc(strlen(tracks_url) + 1);
             if (_tracks_url == NULL) {
-                free(p);
                 free(tracks);
                 err = -1;
                 ESP_LOGI(TAG, "failed to allocate memory for tracks_url");
@@ -450,7 +456,6 @@ static int process_line() {
         if (blinks_array_size) {
             _blinks = (blink_t *)malloc(blinks_array_size * sizeof(blink_t));
             if (_blinks == NULL) {
-                free(p);
                 if (_tracks) {
                     free(_tracks);
                     free(_tracks_url);
@@ -461,8 +466,8 @@ static int process_line() {
             }
         }
 
-        memset(p, 0, sizeof(play_context_t));
-
+        xSemaphoreTake(play_context.lock, portMAX_DELAY); 
+        p = &play_context;
         if (tracks_array_size) {
             p->tracks_url = _tracks_url;
             p->tracks_array_size = tracks_array_size;
@@ -473,10 +478,10 @@ static int process_line() {
                 p->tracks[i].digest = track_name_to_digest(
                     cJSON_GetObjectItem(item, "name")->valuestring);
                 p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
-                p->tracks[i].start =
-                    cJSON_GetObjectItem(item, "start")->valueint;
-                p->tracks[i].begin = 0;
-                p->tracks[i].end = cJSON_GetObjectItem(item, "dur")->valueint;
+                p->tracks[i].position =
+                    cJSON_GetObjectItem(item, "position")->valueint;
+                p->tracks[i].begin = cJSON_GetObjectItem(item, "begin")->valueint;
+                p->tracks[i].end = cJSON_GetObjectItem(item, "end")->valueint;
                 p->tracks[i].chan = cJSON_GetObjectItem(item, "chan")->valueint;
             }
         }
@@ -503,32 +508,13 @@ static int process_line() {
             }
         }
 
-        // message_t msg = {.type = MSG_CMD_PLAY, .value = {.play_context = p}};
-        // if (pdTRUE != xQueueSend(juggler_queue, &msg, 0)) {
-        // if (pdTRUE != xQueueSend(juggler_queue, &msg, 0)) {
-
-        play_index++;
-        p->index = play_index;
+        p->index++;
 
         /**
-         * audible has a higher priority than this task, so the sent message
+         * player has a higher priority than this task, so the sent message
          * may appear after receiver's message in log
          */
-        err = periph_cloud_send_event(PERIPH_CLOUD_CMD_PLAY, p, sizeof(p));
-        if (err != ESP_OK) {
-            free(p);
-            if (tracks_array_size) {
-                free(_tracks);
-                free(_tracks_url);
-            }
-            if (blinks_array_size) {
-                free(_blinks);
-            }
-            ESP_LOGI(TAG, "failed to enqueue play request");
-            goto finish;
-        } else {
-            ESP_LOGI(TAG, "play command sent to audible");
-        }
+        cloud_cmd_play();
     }
 
 finish:
@@ -747,7 +733,6 @@ void app_main(void) {
 
     event_bits = xEventGroupCreate();
 
-    /** this could be created on demand */
     http_ota_queue = xQueueCreate(1, sizeof(message_t));
     tcp_send_queue = xQueueCreate(8, sizeof(message_t));
     audio_queue = xQueueCreate(8, sizeof(message_t));
@@ -767,7 +752,7 @@ void app_main(void) {
 
     xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
     xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
-    xTaskCreatePinnedToCore(audible, "audible", 4096, NULL, 18, NULL, 1);
+    xTaskCreatePinnedToCore(player, "player", 4096, NULL, 18, NULL, 1);
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));

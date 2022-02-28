@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/event_groups.h"
 
 #include "esp_err.h"
@@ -13,7 +14,6 @@
 #include "audio_mem.h"
 #include "audio_common.h"
 #include "i2s_stream.h"
-#include "mp3_decoder.h"
 #include "raw_stream.h"
 
 #include "esp_log.h"
@@ -25,9 +25,9 @@
 
 #include "roadhill.h"
 
-const char *TAG = "audible";
+const char *TAG = "player";
 
-#define AUDIO_DATA_BUF_SIZE (16384)
+#define AUDIO_DATA_BUF_SIZE (16 * 384)
 #define AUDIO_DATA_BUF_NUM (2)
 
 extern QueueHandle_t tcp_send_queue;
@@ -35,7 +35,7 @@ extern QueueHandle_t juggler_queue;
 extern QueueHandle_t audio_queue;
 extern QueueHandle_t ble_queue;
 
-play_context_t* play_context = NULL;
+play_context_t play_context = {0};
 
 /**
 static esp_err_t unity_open(audio_element_handle_t self) {
@@ -68,26 +68,21 @@ static esp_err_t unity_close(audio_element_handle_t self) {
 }
 */
 
-static esp_periph_handle_t periph_cloud = NULL;
+static esp_periph_handle_t emitter = NULL;
 
-esp_err_t periph_cloud_send_event(int cmd, void *data, int data_len) {
-    if (!periph_cloud) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    return esp_periph_send_event(periph_cloud, cmd, data, data_len);
+static esp_err_t emitter_emit(int cmd, void *data, int data_len) {
+    return esp_periph_send_event(emitter, cmd, data, data_len);
 }
 
-static esp_err_t periph_cloud_init(esp_periph_handle_t self) {
-    periph_cloud = self;
+static esp_err_t emitter_init(esp_periph_handle_t self) {
+    emitter = self;
     return ESP_OK;
 }
 
-static esp_err_t periph_cloud_deinit(esp_periph_handle_t self) {
-    periph_cloud = NULL;
+static esp_err_t emitter_deinit(esp_periph_handle_t self) {
+    emitter = NULL;
     return ESP_OK;
 }
-
-
 
 static char *data = NULL;
 static int data_length = 0;
@@ -135,8 +130,7 @@ static void timer_cb(void *arg) {
 static void test_timer_cb(void *arg) {
     static int test_counter = 0;
     test_counter++;
-    periph_cloud_send_event(PERIPH_CLOUD_CMD_TEST, &test_counter,
-                            sizeof(test_counter));
+    emitter_emit(TEST_TIMER_FIRE, &test_counter, sizeof(test_counter));
 }
 
 /**
@@ -146,8 +140,8 @@ static void test_timer_cb(void *arg) {
  * so there's no data not played when abort. and as long as data available, play
  * it.
  */
-static int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len,
-                             TickType_t wait_time, void *ctx) {
+static int read_cb(audio_element_handle_t el, char *buf, int len,
+                   TickType_t wait_time, void *ctx) {
 
 top:
     if (data) {
@@ -196,13 +190,15 @@ top:
 }
 
 /**
- * audible
+ * player
  * 1. recv cloud command from event interface
- * 2. recv audio data from audible queue
- * 
- * audible has only one 
+ * 2. recv audio data from player queue
+ *
+ * player has only one
  */
-void audible(void *arg) {
+void player(void *arg) {
+    play_context.lock = xSemaphoreCreateMutex();
+
     esp_timer_init();
     esp_timer_create_args_t args = {
         .callback = &timer_cb,
@@ -219,7 +215,7 @@ void audible(void *arg) {
     esp_timer_create(&test_args, &test_timer);
 
     audio_pipeline_handle_t pipeline;
-    audio_element_handle_t i2s_stream_writer, mp3_decoder;
+    audio_element_handle_t i2s_stream_writer;
 
     ESP_LOGI(TAG, "[ 1 ] Start audio codec chip");
     audio_board_handle_t board_handle = audio_board_init();
@@ -229,53 +225,26 @@ void audible(void *arg) {
     int player_volume;
     audio_hal_get_volume(board_handle->audio_hal, &player_volume);
 
-    ESP_LOGI(TAG, "[ 2 ] Create audio pipeline, add all elements to pipeline, "
-                  "and subscribe pipeline event");
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     pipeline = audio_pipeline_init(&pipeline_cfg);
     mem_assert(pipeline);
 
-#if 0
-#define MP3_DECODER_TASK_STACK_SIZE (5 * 1024)
-#define MP3_DECODER_TASK_CORE (0)
-#define MP3_DECODER_TASK_PRIO (5)
-#define MP3_DECODER_RINGBUFFER_SIZE (2 * 1024)
-
-#define DEFAULT_MP3_DECODER_CONFIG()                                           \
-    {                                                                          \
-        .out_rb_size = MP3_DECODER_RINGBUFFER_SIZE,                            \
-        .task_stack = MP3_DECODER_TASK_STACK_SIZE,                             \
-        .task_core = MP3_DECODER_TASK_CORE,                                    \
-        .task_prio = MP3_DECODER_TASK_PRIO, .stack_in_ext = true,              \
-    }
-#endif
-
-    ESP_LOGI(TAG, "[2.1] Create mp3 decoder to decode mp3 file and set custom "
-                  "read callback");
-    mp3_decoder_cfg_t mp3_cfg = {
-        .out_rb_size = 128 * 1024,
-        .task_stack = 6 * 1024,
-        .task_core = 1,
-        .task_prio = 20,
-        .stack_in_ext = true,
-    };
-    mp3_decoder = mp3_decoder_init(&mp3_cfg);
-    audio_element_set_read_cb(mp3_decoder, mp3_music_read_cb, NULL);
-
-    ESP_LOGI(TAG, "[2.2] Create i2s stream to write data to codec chip");
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_cfg.type = AUDIO_STREAM_WRITER;
+    i2s_cfg.i2s_config.sample_rate = 48000;
     i2s_stream_writer = i2s_stream_init(&i2s_cfg);
+    
+    // i2s_stream_set_clk(i2s_stream_writer, 48000, 16, 2);
+
+    audio_element_set_read_cb(i2s_stream_writer, read_cb, NULL);
 
     ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
-    audio_pipeline_register(pipeline, mp3_decoder, "mp3");
     audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
-    ESP_LOGI(TAG,
-             "[2.4] Link it together "
-             "[mp3_music_read_cb]-->mp3_decoder-->i2s_stream-->[codec_chip]");
-    const char *link_tag[2] = {"mp3", "i2s"};
-    audio_pipeline_link(pipeline, &link_tag[0], 2);
+    ESP_LOGI(TAG, "[2.4] Link it together "
+                  "[mp3_music_read_cb]-->i2s_stream-->[codec_chip]");
+    const char *link_tag[1] = {"i2s"};
+    audio_pipeline_link(pipeline, &link_tag[0], 1);
 
     ESP_LOGI(TAG, "[ 3 ] Initialize peripherals");
     esp_periph_config_t periph_cfg = DEFAULT_ESP_PERIPH_SET_CONFIG();
@@ -300,27 +269,17 @@ void audible(void *arg) {
 
     // this is a stack variable, not the global one
     // the global one is set/unset in init/deinit function
-    esp_periph_handle_t periph_cloud =
-        esp_periph_create(PERIPH_ID_CLOUD, "periph_cloud");
-    assert(periph_cloud);
-    esp_periph_set_data(periph_cloud, NULL);
-    esp_periph_set_function(periph_cloud, periph_cloud_init, NULL,
-                            periph_cloud_deinit);
+    esp_periph_handle_t emitter =
+        esp_periph_create(PERIPH_ID_EMITTER, "emitter");
+    assert(emitter);
+    esp_periph_set_data(emitter, NULL);
+    esp_periph_set_function(emitter, emitter_init, NULL, emitter_deinit);
+    esp_periph_start(set, emitter);
 
-    esp_periph_start(set, periph_cloud);
-
-    ESP_LOGI(TAG, "[4.1] Listening event from all elements of pipeline");
     audio_pipeline_set_listener(pipeline, evt);
 
-    ESP_LOGI(TAG, "[4.2] Listening event from peripherals");
     audio_event_iface_set_listener(esp_periph_set_get_event_iface(set), evt);
 
-    ESP_LOGW(TAG, "[ 5 ] Tap touch buttons to control music player:");
-    ESP_LOGW(TAG, "      [Play] to start, pause and resume, [Set] to stop.");
-    ESP_LOGW(TAG, "      [Vol-] or [Vol+] to adjust volume.");
-
-    ESP_LOGI(TAG, "[ 5.1 ] Start audio_pipeline");
-    // set_next_file_marker();
     audio_pipeline_run(pipeline);
 
     esp_timer_start_periodic(test_timer, 1000000 * 5);
@@ -332,78 +291,22 @@ void audible(void *arg) {
             continue;
         }
 
-        if (msg.source_type == PERIPH_ID_CLOUD) {
+        if (msg.source_type == PERIPH_ID_EMITTER) {
             switch (msg.cmd) {
-            case PERIPH_CLOUD_CMD_PLAY: {
-                /**
-                 * there is a little chance that this process
-                 * race with esp_timer callback , ie. a mutex for
-                 * play_context may be necessary
-                 */
-
-                /**
-                 * blinking is stopped SYNCHRONOUSLY by stopping timer
-                 * play_context is updated instantly, and read_cb will
-                 * check play_index for each mem_block.
-                 *
-                 * index, tracks array and url is sent to next handler
-                 * immediately even if there is no tracks, which acting 
-                 * as a stop
-                 */
-                play_context_t *p;
-                if (play_context) {
-                    // is this idempotent? answer: it returns error if
-                    // timer is already stopped, but harmless
-                    esp_timer_stop(blink_timer);
-                    if (play_context->blinks) {
-                        free(play_context->blinks);
-                    }
-                }
-
-                p = (play_context_t*)msg.data;
-                message_t msg = {.type = MSG_CMD_PLAY};
-                msg.value.play_data.index = p->index;
-                msg.value.play_data.tracks_url = p->tracks_url;
-                msg.value.play_data.tracks_array_size = p->tracks_array_size;
-                msg.value.play_data.tracks = p->tracks;
-                
-                // handler error, otherwise memory leak
-                if (pdTRUE != xQueueSend(juggler_queue, &msg, portMAX_DELAY)) {
-                    // free memory if ownership not transferred to next
-                    if (p->tracks_array_size > 0) {
-                        free(p->tracks_url);    
-                        free(p->tracks);
-                    }
-                }
-                p->tracks_url = NULL;
-                p->tracks = NULL;
-                play_context = p;
-
-                ESP_LOGI(TAG, "play command (%u) processed", p->index);
+            case CLOUD_CMD_STOP: {
             } break;
-            case PERIPH_CLOUD_CMD_TEST:
-                ESP_LOGI(TAG, "periph_cloud test timer counts %d",
-                         *((int *)msg.data));
+            case CLOUD_CMD_PLAY: {
+                xSemaphoreTake(play_context.lock, portMAX_DELAY);
+
+                
+
+            } break;
+            case TEST_TIMER_FIRE:
+                ESP_LOGI(TAG, "test timer counts %d", *((int *)msg.data));
                 break;
             default:
                 break;
             }
-            continue;
-        }
-
-        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT &&
-            msg.source == (void *)mp3_decoder &&
-            msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
-            audio_element_info_t music_info = {0};
-            audio_element_getinfo(mp3_decoder, &music_info);
-            ESP_LOGI(TAG,
-                     "[ * ] Receive music info from mp3 decoder, "
-                     "sample_rates=%d, bits=%d, ch=%d",
-                     music_info.sample_rates, music_info.bits,
-                     music_info.channels);
-            audio_element_setinfo(i2s_stream_writer, &music_info);
-            i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates,
-                               music_info.bits, music_info.channels);
             continue;
         }
 
@@ -471,3 +374,7 @@ void audible(void *arg) {
         }
     }
 }
+
+void cloud_cmd_play() { emitter_emit(CLOUD_CMD_PLAY, NULL, 0); }
+
+void cloud_cmd_stop() { emitter_emit(CLOUD_CMD_STOP, NULL, 0); }

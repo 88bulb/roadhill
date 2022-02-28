@@ -6,7 +6,9 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
+#include "audio_common.h"
 
 // used by mem_block_t
 #define MEM_BLOCK_SIZE (32768)
@@ -19,39 +21,21 @@
         (type *)((char *)__mptr - ))offsetof(type, member));                   \
     })
 
-#define PERIPH_ID_CLOUD (AUDIO_ELEMENT_TYPE_PERIPH + 0xc1)
-#define PERIPH_ID_JUGGLER (AUDIO_ELEMENT_TYPE_PERIPH + 0xc2)
+#define PERIPH_ID_EMITTER   (AUDIO_ELEMENT_TYPE_PERIPH + 0xc1)
 
-#define PERIPH_CLOUD_CMD_OTA (0)
-#define PERIPH_CLOUD_CMD_CONFIG (1)
-#define PERIPH_CLOUD_CMD_PLAY (2)
-#define PERIPH_CLOUD_CMD_STOP (3)
-#define PERIPH_CLOUD_CMD_TEST (0x7e57)
-
-#define MOUNT_POINT "/mmc"
-#define CHUNK_FILE_SIZE (1024 * 1024)
-#define TEMP_FILE_PATH "/mmc/temp"
+#define CLOUD_CMD_OTA (0)
+#define CLOUD_CMD_CONFIG (1)
+#define CLOUD_CMD_PLAY (2)
+#define CLOUD_CMD_STOP (3)
+#define TEST_TIMER_FIRE (0x7e57)
 
 #define BLOCK_NUM_BOUND (16 * 8 * 1024)
-#define BLOCK_NUM_FRACT 7 / 8           // delibrately no parenthesis
+#define BLOCK_NUM_FRACT 7 / 8 // delibrately no parenthesis
 #define BUCKET_BITS (12)
 #define BUCKET_SIZE (1024)
 #define META_OFFSET (((uint64_t)1 << BUCKET_BITS) * BUCKET_SIZE) // 4MB
-#define DATA_OFFSET (META_OFFSET * 2)   // 8MB
-#define WLOG_OFFSET (META_OFFSET / 2)   // 2MB
-
-typedef struct __attribute__((packed)) {
-    uint8_t md5sum[16];
-    uint32_t size;
-    uint32_t access;
-    uint32_t blk_addr;
-    uint16_t hole_addr;
-    uint16_t hole_size;
-} siffs_metadata_t;
-
-typedef struct {
-    siffs_metadata_t meta[32];
-} siffs_metadata_bucket_t;
+#define DATA_OFFSET (META_OFFSET * 2)                            // 8MB
+#define WLOG_OFFSET (META_OFFSET / 2)                            // 2MB
 
 typedef struct play_context play_context_t;
 typedef struct fetch_context fetch_context_t;
@@ -76,7 +60,7 @@ typedef struct {
 typedef struct {
     md5_digest_t digest;
     int size;
-    int start;
+    int position;
     int begin;
     int end;
     int chan;
@@ -93,7 +77,7 @@ typedef struct {
 } fetch_error_t;
 
 typedef struct {
-    int play_index; 
+    int play_index;
     int length;
     char *data;
 } mem_block_t;
@@ -153,7 +137,6 @@ typedef struct {
         mem_block_t mem_block;
         blink_data_t blink_data;
         play_data_t play_data;
-//        play_context_t *play_context;
     } value;
 } message_t;
 
@@ -166,12 +149,10 @@ struct fetch_context {
     char url[URL_BUFFER_SIZE];
     md5_digest_t digest;
     int track_size;
-    uint32_t play_index; 
+    uint32_t play_index;
     bool play_started;
 
     QueueHandle_t input;
-
-    play_context_t *play_ctx;
 };
 
 struct picman_context {
@@ -185,10 +166,10 @@ typedef struct {
     int track_size;
 } picman_inmsg_data_t;
 
-typedef picman_inmsg_data_t* picman_inmsg_handle_t;
+typedef picman_inmsg_data_t *picman_inmsg_handle_t;
 
 typedef struct {
-    char* data;
+    char *data;
     int size_or_error;
 } picman_outmsg_t;
 
@@ -236,6 +217,7 @@ typedef struct {
  * to a new job if it happens to be the tracks[0] of the new play.
  */
 struct play_context {
+    SemaphoreHandle_t lock;
     uint32_t index;
 
     /** reserved */
@@ -273,7 +255,6 @@ typedef struct {
     int blinks_array_size;
     int chunk_index;
 } chunk_data_t;
-
 
 /****************************
 
@@ -314,7 +295,7 @@ header describes:
 4. buckets:
     1. size
     2. number of buckets
-    3. where starts 
+    3. where starts
 5. writelog offset (twice the size of a bucket)
 6. data
     1. starts
@@ -326,7 +307,7 @@ header describes:
 
 typedef struct {
     uint64_t log_start;
-    uint64_t log_sect;      // twice bucket_sect
+    uint64_t log_sect; // twice bucket_sect
     uint64_t bucket_start;
     uint64_t bucket_sect;
     uint64_t bucket_count;
@@ -364,7 +345,7 @@ _Static_assert(sizeof(mmcfs_superblock_t) == 512,
 
 /**
  * There may be three TYPEs of file.
- * 1. original mp3 file. 
+ * 1. original mp3 file.
  *      with or without link
  *      data type: stream
  *      data_size
@@ -409,9 +390,9 @@ typedef struct __attribute__((packed)) {
     uint16_t type; // 0 for unused, 1 for mp3, 2 for pcm
 
     // for mp3, both are zero
-    // for pcm, pcm is modelled as a packet stream, not a 
+    // for pcm, pcm is modelled as a packet stream, not a
     uint8_t pcm_sect;
-    uint8_t oob_sect;  
+    uint8_t oob_sect;
 
     uint32_t zero[3];
 } mmcfs_file_t;
@@ -419,9 +400,12 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(mmcfs_file_t) == 64, "mmc_file_t size incorrect");
 
 typedef struct {
-  mmcfs_file_t files[16];
+    mmcfs_file_t files[16];
 } mmcfs_bucket_t;
 
 _Static_assert(sizeof(mmcfs_bucket_t) == 1024, "mmc_bucket_t size incorrect");
 
+extern play_context_t play_context;
+void cloud_cmd_play();
+void cloud_cmd_stop();
 
