@@ -76,6 +76,10 @@ typedef struct {
 typedef struct {
     md5_digest_t digest;
     int size;
+    int start;
+    int begin;
+    int end;
+    int chan;
 } track_t;
 
 typedef struct {

@@ -289,17 +289,17 @@ static int process_line() {
         ESP_LOGI(TAG, "ota request queued, url: %s", url);
 
     } else if (0 == strcmp(cmd, "PLAY")) {
-        cJSON *tracks = NULL; 
+        cJSON *tracks = NULL;
         int tracks_array_size = 0;
-        track_t* _tracks = NULL;
+        track_t *_tracks = NULL;
         char *tracks_url = NULL;
-        char* _tracks_url = NULL;
+        char *_tracks_url = NULL;
 
         cJSON *blinks = NULL;
         int blinks_array_size = 0;
-        blink_t* _blinks = NULL;
+        blink_t *_blinks = NULL;
 
-        play_context_t* p = NULL;
+        play_context_t *p = NULL;
 
         // tracks is optional
         tracks = cJSON_GetObjectItem(root, "tracks");
@@ -420,12 +420,12 @@ static int process_line() {
         }
 
         /** now let allocate memory */
-        p = (play_context_t*)malloc(sizeof(play_context_t));
+        p = (play_context_t *)malloc(sizeof(play_context_t));
         if (p == NULL) {
             err = -1;
-            ESP_LOGI(TAG, "failed to allocate memory for play_context");   
+            ESP_LOGI(TAG, "failed to allocate memory for play_context");
             goto finish;
-        } 
+        }
 
         if (tracks_array_size) {
             _tracks = (track_t *)malloc(tracks_array_size * sizeof(track_t));
@@ -436,14 +436,14 @@ static int process_line() {
                 goto finish;
             }
 
-            _tracks_url = (char*)malloc(strlen(tracks_url) + 1);
-            if (_tracks_url == NULL ) {
+            _tracks_url = (char *)malloc(strlen(tracks_url) + 1);
+            if (_tracks_url == NULL) {
                 free(p);
                 free(tracks);
                 err = -1;
                 ESP_LOGI(TAG, "failed to allocate memory for tracks_url");
             }
-            strcpy(_tracks_url, tracks_url); 
+            strcpy(_tracks_url, tracks_url);
         }
 
         _blinks = NULL;
@@ -473,6 +473,11 @@ static int process_line() {
                 p->tracks[i].digest = track_name_to_digest(
                     cJSON_GetObjectItem(item, "name")->valuestring);
                 p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
+                p->tracks[i].start =
+                    cJSON_GetObjectItem(item, "start")->valueint;
+                p->tracks[i].begin = 0;
+                p->tracks[i].end = cJSON_GetObjectItem(item, "dur")->valueint;
+                p->tracks[i].chan = cJSON_GetObjectItem(item, "chan")->valueint;
             }
         }
 
@@ -515,7 +520,7 @@ static int process_line() {
             if (tracks_array_size) {
                 free(_tracks);
                 free(_tracks_url);
-            } 
+            }
             if (blinks_array_size) {
                 free(_blinks);
             }
