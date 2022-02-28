@@ -32,7 +32,7 @@ const char *TAG = "player";
 
 extern QueueHandle_t tcp_send_queue;
 extern QueueHandle_t juggler_queue;
-extern QueueHandle_t audio_queue;
+// extern QueueHandle_t audio_queue;
 extern QueueHandle_t ble_queue;
 
 play_context_t play_context = {0};
@@ -143,7 +143,7 @@ static void test_timer_cb(void *arg) {
 static int read_cb(audio_element_handle_t el, char *buf, int len,
                    TickType_t wait_time, void *ctx) {
 
-top:
+// top:
     if (data) {
         if (len < data_length - data_played) {
             memcpy(buf, &data[data_played], len);
@@ -167,8 +167,9 @@ top:
     }
 
     while (1) {
+/**
         message_t msg;
-        xQueueReceive(audio_queue, &msg, portMAX_DELAY);
+        // xQueueReceive(audio_queue, &msg, portMAX_DELAY);
 
         if (msg.type == MSG_BLINK_DATA) {
             blinks_array_size = msg.value.blink_data.blinks_array_size;
@@ -186,6 +187,7 @@ top:
         } else if (msg.type == MSG_BLINK_ABORT) {
             blink_done();
         }
+*/
     }
 }
 

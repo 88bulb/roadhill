@@ -45,7 +45,7 @@ typedef struct picman_context picman_context_t;
 extern QueueHandle_t play_context_queue;
 extern QueueHandle_t juggler_queue;
 extern QueueHandle_t tcp_send_queue;
-extern QueueHandle_t audio_queue;
+//extern QueueHandle_t audio_queue;
 
 extern const char hex_char[16];
 

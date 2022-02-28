@@ -50,7 +50,7 @@ static EventGroupHandle_t event_bits;
 static QueueHandle_t http_ota_queue;
 
 QueueHandle_t tcp_send_queue;
-QueueHandle_t audio_queue;
+// QueueHandle_t audio_queue;
 
 static esp_netif_t *sta_netif = NULL;
 static esp_netif_t *ap_netif = NULL;
@@ -735,7 +735,7 @@ void app_main(void) {
 
     http_ota_queue = xQueueCreate(1, sizeof(message_t));
     tcp_send_queue = xQueueCreate(8, sizeof(message_t));
-    audio_queue = xQueueCreate(8, sizeof(message_t));
+    // audio_queue = xQueueCreate(8, sizeof(message_t));
     juggler_queue = xQueueCreate(8, sizeof(message_t));
 
     xTaskCreate(http_ota, "http_ota", 8192, NULL, 11, NULL);
