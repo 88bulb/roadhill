@@ -467,6 +467,13 @@ typedef struct {
 
 _Static_assert(sizeof(mmcfs_bucket_t) == 1024, "mmc_bucket_t size incorrect");
 
+typedef struct mmcfs_file_context mmcfs_file_context_t;
+typedef mmcfs_file_context_t* mmcfs_file_handle_t;
+mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint64_t size);
+int mmcfs_write_mp3(mmcfs_file_handle_t file, char* buf, size_t len);
+int mmcfs_write_pcm(mmcfs_file_handle_t file, char* buf, size_t len);
+int mmcfs_write_end(mmcfs_file_handle_t file);
+
 extern play_context_t play_context;
 void cloud_cmd_play();
 void cloud_cmd_stop();

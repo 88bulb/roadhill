@@ -145,7 +145,7 @@ esp_err_t clear_bits(uint32_t start, uint32_t end, uint32_t *conflict) {
     return ESP_OK;
 }
 
-/**
+/*
  * for mp3 and pcm file
  * create_mp3 (md5 & size)
  * create_pcm (with mp3 md5, only estimated size)
@@ -168,6 +168,9 @@ uint64_t round_power2(uint64_t n) {
     return n << 1;
 }
 
+/*
+ *
+ */
 static void sdmmc_card_info(const sdmmc_card_t *card) {
     bool print_scr = false;
     bool print_csd = false;
@@ -483,6 +486,34 @@ static esp_err_t init_falloc_bitmap() {
     return ESP_OK;
 }
 
+int size_in_block(uint64_t size) {
+    int block_size = fs->block_sect * 512;
+    return (size % block_size == 0) ? size / block_size : size / block_size + 1;
+}
+
+/*
+ * return starting block index, zero-based, or -1 (0xffffffff).
+ */
+uint32_t allocate_blocks(uint32_t blocks) {
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < 16 * 1024; i++) {
+        if (test_bit(i)) {
+            count = 0;
+        } else {
+            count++;
+        }
+
+        if (count == blocks) {
+            uint32_t start = i - blocks + 1;
+            for (uint32_t i = start; i < start + blocks; i++) {
+                set_bit(i);
+            }
+            return start;
+        }
+    } 
+    return -1;
+}
+
 /*
  * all-in-one function to do them all
  */
@@ -543,12 +574,51 @@ int mmcfs_stat(const md5_digest_t *digest, mmcfs_finfo_t *finfo) {
     return 0;
 }
 
-typedef struct writing_context {
+struct mmcfs_file_context {
     md5_digest_t digest;
     uint64_t size;
+    uint32_t mp3_start;
+    uint32_t mp3_blocks;
+    uint32_t pcm_start;
+    uint32_t pcm_blocks;
+};
 
-} writing_context_t;
+static mmcfs_file_context_t *wctx = NULL;
 
-static writing_context_t *wctx = NULL;
+/*
+ * minimal 128kbps (16KiB/s)
+ */
+mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint64_t size) {
+    int mp3_blocks = size_in_block(size);
+    int est_pcm_size = size / (16 * 1024) * 48000 * 4;
+    int est_pcm_blocks = size_in_block(est_pcm_size);
+    int total_blocks = mp3_blocks + est_pcm_blocks;
 
-int mmcfs_create_file(md5_digest_t *digest, uint64_t size) {}
+    uint32_t start = allocate_blocks(total_blocks);
+    if (start == -1)
+        return NULL;
+
+    wctx = (mmcfs_file_context_t *)malloc(sizeof(mmcfs_file_context_t));
+    if (wctx) {
+        memcpy(&wctx->digest, digest, sizeof(wctx->digest));
+        wctx->size = size;
+        wctx->mp3_start = start;
+        wctx->mp3_blocks = mp3_blocks;
+        wctx->pcm_start = start + mp3_blocks;
+        wctx->pcm_blocks = est_pcm_blocks;
+    }
+
+    return wctx;
+}
+
+int mmcfs_write_mp3(mmcfs_file_handle_t file, char* buf, size_t len) {
+    return 0;
+}
+
+int mmcfs_write_pcm(mmcfs_file_handle_t file, char* buf, size_t len) {
+    return 0;
+}
+
+int mmcfs_write_end(mmcfs_file_handle_t file) {
+    return 0;
+}
