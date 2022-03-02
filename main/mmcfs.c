@@ -17,7 +17,12 @@
 
 static const char *TAG = "mmcfs";
 
-#define SUPERBLOCK_SECTOR   (2)
+#define SUPERBLOCK_SECTOR (2)
+
+typedef struct mmcfs_range {
+    uint64_t begin;
+    uint64_t end;
+} mmcfs_range_t;
 
 /** echo "morning my cat" | md5sum */
 const char mmcfs_superblock_magic[16] = {0xf2, 0xf4, 0x82, 0x9f, 0x63, 0x69,
@@ -27,13 +32,13 @@ const char mmcfs_superblock_magic[16] = {0xf2, 0xf4, 0x82, 0x9f, 0x63, 0x69,
 /**
  * this may be changed to pointer in future TODO
  */
-static sdmmc_card_t* card = NULL;
-static mmcfs_superblock_t* superblock = NULL;
-static mmcfs_t* fs = NULL;
+static sdmmc_card_t *card = NULL;
+static mmcfs_superblock_t *superblock = NULL;
+static mmcfs_t *fs = NULL;
 
 static uint64_t last_access = 0;
 
-static uint8_t bit_array[16 * 1024] __attribute__ ((aligned(4))) = {0};
+static uint8_t bit_array[16 * 1024] __attribute__((aligned(4))) = {0};
 static uint8_t bit_count = 0;
 
 /* The ONLY read/write buf for mmc io, which means data must be
@@ -41,53 +46,75 @@ static uint8_t bit_count = 0;
  * Explicit 'preload' may be required for write operation if the caller
  * want to reuse the data as soon as possible.
  * For read operation, the caller should copy the data into another buffer
- * if it is possible to trigger further mmc read/write operation during 
+ * if it is possible to trigger further mmc read/write operation during
  * data processing. Otherwise, the data could be proessed in situ to avoid
  * memory duplication.
  */
 static uint8_t iobuf[16 * 1024] __attribute__((aligned(8))) = {0};
 
-/* These three functions are UNSAFE. Callers must check range for themselves. 
+static bool mmcfs_file_is_null(const mmcfs_file_t *file) {
+    return file->type == 0;
+}
+static bool mmcfs_file_is_mp3(const mmcfs_file_t *file) {
+    return file->type == 1;
+}
+static bool mmcfs_file_is_pcm(const mmcfs_file_t *file) {
+    return file->type == 2;
+}
+static bool mmcfs_file_digest_match(const mmcfs_file_t *file,
+                                    const md5_digest_t *digest) {
+    return memcmp(file->self.bytes, digest->bytes, sizeof(md5_digest_t)) == 0;
+}
+
+static uint16_t mmcfs_bucket_start_sector(const md5_digest_t *digest) {
+    uint16_t index = ((uint16_t)digest->bytes[0]) << 4;
+    index += digest->bytes[1] >> 4;
+    return fs->bucket_start + index * fs->bucket_sect;
+}
+
+static size_t mmcfs_bucket_sector_count() { return fs->bucket_sect; }
+
+static int mmcfs_bucket_find_file(const mmcfs_bucket_t *bucket,
+                                  const md5_digest_t *digest) {
+    for (int i = 0; i < sizeof(bucket->files) / sizeof(bucket->files[0]); i++) {
+        if (mmcfs_file_is_null(&bucket->files[i])) {
+            return -ENOENT;
+        }
+
+        if (mmcfs_file_digest_match(&bucket->files[i], digest)) {
+            return i;
+        }
+    }
+    return -ENOENT;
+}
+
+/* These three functions are UNSAFE. Callers must check range for themselves.
  */
 bool test_bit(int i) {
-    if (bit_array[i / 8] & ((uint8_t)1 << (i % 8))) {
-        return true;
-    } else {
-        return false;
-    }
+    return !!(bit_array[i / 8] & ((uint8_t)1 << (i % 8)));
 }
 
-/**
- *
- */
-void set_bit(int i) {
-    bit_array[i / 8] |= (1 << (i % 8));
-}
+void set_bit(int i) { bit_array[i / 8] |= (1 << (i % 8)); }
 
-/**
- *
- */
-void clear_bit(int i) {
-    bit_array[i / 8] &= ~(1 << (i % 8));
-}
+void clear_bit(int i) { bit_array[i / 8] &= ~(1 << (i % 8)); }
 
 /* Set all bits from start to end (exclusive).
  *
- * The function returns 
+ * The function returns
  * - ESP_ERR_INVALID_ARG, if start > end or end > bit_count
- * - ESP_ERR_INVALID_STATE, if 
+ * - ESP_ERR_INVALID_STATE, if
  */
-esp_err_t set_bits(uint32_t start, uint32_t end, uint32_t* conflict) {
+esp_err_t set_bits(uint32_t start, uint32_t end, uint32_t *conflict) {
     if (start > end || end > bit_count) {
         return ESP_ERR_INVALID_ARG;
     }
 
     for (uint32_t i = start; i < end; i++) {
         if (test_bit(i)) {
-            *conflict = i;        
+            *conflict = i;
             return ESP_ERR_INVALID_STATE;
         }
-    } 
+    }
 
     for (uint32_t i = start; i < end; i++) {
         set_bit(i);
@@ -99,14 +126,14 @@ esp_err_t set_bits(uint32_t start, uint32_t end, uint32_t* conflict) {
 /* Clear all bits from start to end (exclusive)
  * TODO optimize performance
  */
-esp_err_t clear_bits(uint32_t start, uint32_t end, uint32_t* conflict) {
+esp_err_t clear_bits(uint32_t start, uint32_t end, uint32_t *conflict) {
     if (start > end || end > bit_count) {
         return ESP_ERR_INVALID_ARG;
     }
 
     for (uint32_t i = start; i < end; i++) {
         if (!test_bit(i)) {
-            *conflict = i;        
+            *conflict = i;
             return ESP_ERR_INVALID_STATE;
         }
     }
@@ -118,11 +145,11 @@ esp_err_t clear_bits(uint32_t start, uint32_t end, uint32_t* conflict) {
     return ESP_OK;
 }
 
-/** 
+/**
  * for mp3 and pcm file
  * create_mp3 (md5 & size)
  * create_pcm (with mp3 md5, only estimated size)
- * 
+ *
  * write_mp3
  * write_pcm
  *
@@ -131,7 +158,7 @@ esp_err_t clear_bits(uint32_t start, uint32_t end, uint32_t* conflict) {
  * read pcm by pcm_md5, sect
  */
 
-/* round up to next power of 2 
+/* round up to next power of 2
  */
 uint64_t round_power2(uint64_t n) {
     n = n - 1;
@@ -207,7 +234,7 @@ bool mmcfs_superblock_valid(mmcfs_superblock_t *superblock) {
 static esp_err_t init_mmc() {
     esp_err_t err = sdmmc_host_init();
     if (err != ESP_OK) {
-       return err;
+        return err;
     }
 
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
@@ -220,7 +247,7 @@ static esp_err_t init_mmc() {
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
 
-    card = (sdmmc_card_t*)malloc(sizeof(sdmmc_card_t));
+    card = (sdmmc_card_t *)malloc(sizeof(sdmmc_card_t));
     if (card == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -233,7 +260,7 @@ static esp_err_t init_mmc() {
     }
 
     sdmmc_card_info(card);
-    return ESP_OK; 
+    return ESP_OK;
 }
 
 /*
@@ -301,8 +328,8 @@ esp_err_t init_fs() {
     uint64_t bucket_count = 4096;
     uint64_t block_start = 64 * 1024 * 1024 / 512;
     uint64_t avail_sect_for_blocks = card->csd.capacity - block_start;
-    uint64_t block_sect = round_power2(avail_sect_for_blocks) /
-                          MMCFS_MAX_BITARRAY_SIZE;
+    uint64_t block_sect =
+        round_power2(avail_sect_for_blocks) / MMCFS_MAX_BITARRAY_SIZE;
 
     /** reserve the last sector */
     uint64_t block_count = (avail_sect_for_blocks - 1) / block_sect;
@@ -397,7 +424,7 @@ static esp_err_t init_falloc_bitmap() {
     int pcm_count = 0;
     int pcm_block_count = 0;
 
-    mmcfs_bucket_t *outbuf = (mmcfs_bucket_t*)malloc(sizeof(iobuf));
+    mmcfs_bucket_t *outbuf = (mmcfs_bucket_t *)malloc(sizeof(iobuf));
     if (outbuf == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -422,7 +449,6 @@ static esp_err_t init_falloc_bitmap() {
                 mmcfs_file_t *f = &bucket->files[k];
                 if (f->type == 0)
                     break;
-
 
                 uint32_t conflict;
                 err = set_bits(f->block_start, f->block_end, &conflict);
@@ -466,7 +492,7 @@ esp_err_t init_mmcfs() {
     err = init_mmc();
     if (err != ESP_OK)
         return err;
-    
+
     err = init_fs();
     if (err != ESP_OK)
         return err;
@@ -474,4 +500,55 @@ esp_err_t init_mmcfs() {
     return init_falloc_bitmap();
 }
 
+int mmcfs_stat(const md5_digest_t *digest, mmcfs_finfo_t *finfo) {
+    esp_err_t err;
 
+    err = sdmmc_read_sectors(card, iobuf, mmcfs_bucket_start_sector(digest),
+                             mmcfs_bucket_sector_count());
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "mmcfs_stat failed, %s", esp_err_to_name(err));
+        return -EIO;
+    }
+
+    int index = mmcfs_bucket_find_file((mmcfs_bucket_t *)iobuf, digest);
+    if (index < 0) {
+        return -ENOENT;
+    }
+
+    mmcfs_file_t *mp3_file = (mmcfs_file_t *)malloc(sizeof(mmcfs_file_t));
+    if (mp3_file == NULL) {
+        return -ENOMEM;
+    }
+
+    memcpy(mp3_file, &((mmcfs_bucket_t *)iobuf)->files[index],
+           sizeof(mmcfs_file_t));
+
+    err = sdmmc_read_sectors(card, iobuf,
+                             mmcfs_bucket_start_sector(&mp3_file->link),
+                             mmcfs_bucket_sector_count());
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "mmcfs_stat failed, %s", esp_err_to_name(err));
+        free(mp3_file);
+        return -EIO;
+    }
+
+    index = mmcfs_bucket_find_file((mmcfs_bucket_t *)iobuf, &mp3_file->link);
+    if (finfo) {
+        memset(finfo, 0, sizeof(mmcfs_finfo_t));
+        finfo->mp3_state = 2;
+        finfo->pcm_state = index < 0 ? 0 : 2;
+    }
+
+    free(mp3_file);
+    return 0;
+}
+
+typedef struct writing_context {
+    md5_digest_t digest;
+    uint64_t size;
+
+} writing_context_t;
+
+static writing_context_t *wctx = NULL;
+
+int mmcfs_create_file(md5_digest_t *digest, uint64_t size) {}

@@ -34,7 +34,6 @@
 #define TCP_PORT (6015)
 
 extern void player(void *arg);
-extern void juggler(void *arg);
 
 extern esp_err_t periph_cloud_send_event(int cmd, void *data, int data_len);
 
@@ -364,7 +363,7 @@ static int process_line() {
                 cJSON *position = cJSON_GetObjectItem(item, "position");
                 if (!cJSON_IsNumber(position)) {
                     err = -1;
-                    ESP_LOGI(TAG, "track[%d] start not a number", i);
+                    ESP_LOGI(TAG, "track[%d] position not a number", i);
                     goto finish;
                 }
 
@@ -466,6 +465,7 @@ static int process_line() {
             }
         }
 
+        ESP_LOGI(TAG, "taking play context lock");
         xSemaphoreTake(play_context.lock, portMAX_DELAY); 
         p = &play_context;
         if (tracks_array_size) {
@@ -509,6 +509,7 @@ static int process_line() {
         }
 
         p->index++;
+        xSemaphoreGive(play_context.lock);
 
         /**
          * player has a higher priority than this task, so the sent message
@@ -633,7 +634,10 @@ static void tcp_receive(void *arg) {
                         line[llen] = '\0';
                         // TODO
                         if (process_line()) {
-                            goto closing;
+                            ESP_LOGI(TAG, "process_line returns error");
+                            llen = 0;
+                            continue;
+                            //goto closing;
                         }
 
                         llen = 0;
@@ -735,11 +739,7 @@ void app_main(void) {
 
     http_ota_queue = xQueueCreate(1, sizeof(message_t));
     tcp_send_queue = xQueueCreate(8, sizeof(message_t));
-    // audio_queue = xQueueCreate(8, sizeof(message_t));
-    juggler_queue = xQueueCreate(8, sizeof(message_t));
-
     xTaskCreate(http_ota, "http_ota", 8192, NULL, 11, NULL);
-    xTaskCreate(juggler, "juggler", 8192, NULL, 11, NULL);
 
     // init nvs
     err = nvs_flash_init();
@@ -753,6 +753,8 @@ void app_main(void) {
     xTaskCreate(tcp_send, "tcp_send", 4096, NULL, 9, NULL);
     xTaskCreate(tcp_receive, "tcp_receive", 4096, NULL, 15, NULL);
     xTaskCreatePinnedToCore(player, "player", 4096, NULL, 18, NULL, 1);
+
+    esp_timer_init();
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));

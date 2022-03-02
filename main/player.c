@@ -30,9 +30,9 @@ const char *TAG = "player";
 #define AUDIO_DATA_BUF_SIZE (16 * 384)
 #define AUDIO_DATA_BUF_NUM (2)
 
+extern void juggler(void *arg);
+
 extern QueueHandle_t tcp_send_queue;
-extern QueueHandle_t juggler_queue;
-// extern QueueHandle_t audio_queue;
 extern QueueHandle_t ble_queue;
 
 play_context_t play_context = {0};
@@ -84,21 +84,25 @@ static esp_err_t emitter_deinit(esp_periph_handle_t self) {
     return ESP_OK;
 }
 
-static char *data = NULL;
-static int data_length = 0;
-static int data_played = 0;
+// static char *data = NULL;
+// static int data_length = 0;
+// static int data_played = 0;
 
-static blink_t *blinks = NULL;
-static int blinks_array_size = 0;
+// static blink_t *blinks = NULL;
+// static int blinks_array_size = 0;
 
-static int blink_next = -1;
-static int64_t blink_start = -1;
+// static int blink_next = -1;
+// static int64_t blink_start = -1;
 
-static esp_timer_handle_t blink_timer;
-static esp_timer_handle_t test_timer;
+// static esp_timer_handle_t blink_timer;
+// static esp_timer_handle_t test_timer;
 
 extern QueueHandle_t ble_queue;
 
+QueueHandle_t jug_in;
+QueueHandle_t jug_out;
+
+/*
 static void blink_done() {
     if (blinks_array_size) {
         blinks_array_size = 0;
@@ -109,10 +113,11 @@ static void blink_done() {
 
         message_t msg = {.type = MSG_BLINK_DONE};
 
-        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
+        // xQueueSend(juggler_queue, &msg, portMAX_DELAY);
     }
-}
+} */
 
+/*
 static void timer_cb(void *arg) {
     if (blink_next < blinks_array_size) {
         if (esp_timer_get_time() - blink_start >
@@ -125,13 +130,84 @@ static void timer_cb(void *arg) {
     } else {
         // xQueueSend
     }
-}
+} */
 
+/*
 static void test_timer_cb(void *arg) {
     static int test_counter = 0;
     test_counter++;
     emitter_emit(TEST_TIMER_FIRE, &test_counter, sizeof(test_counter));
+} */
+
+// read_cb use this index
+static int slice_index = -1;
+/*
+static int req_slice_index = -1;
+static int next_blink = -1;
+static int next_chan0_track = -1;
+static int next_chan1_track = -1;
+*/
+/*
+ *
+ */
+void make_request(frame_request_t *req) {
+    int index = ++slice_index;
+    req->index = index;
+    req->url = play_context.tracks_url;
+
+    req->track_mix[0].track = NULL;
+    for (int i = 0; i < play_context.tracks_array_size; i++) {
+        track_t *trac = &play_context.tracks[i];
+        track_t *next = NULL;
+
+        if (trac->chan == 1)
+            continue;
+
+        for (int j = i + 1; j < play_context.tracks_array_size; j++) {
+            if (play_context.tracks[j].chan == 0) {
+                next = &play_context.tracks[j];
+                break;
+            }
+        }
+
+        int a = trac->position / 40;
+        int b = next == NULL ? INT_MAX : next->position / 40;
+
+        if (a <= index && index < b) {
+            req->track_mix[0].track = trac;
+            req->track_mix[0].pos = index - a;
+            break;
+        }
+    }
+
+    req->track_mix[1].track = NULL;
+    for (int i = 0; i < play_context.tracks_array_size; i++) {
+        track_t *trac = &play_context.tracks[i];
+        track_t *next = NULL;
+
+        if (trac->chan == 0)
+            continue;
+
+        for (int j = i + 1; j < play_context.tracks_array_size; j++) {
+            if (play_context.tracks[j].chan == 1) {
+                next = &play_context.tracks[j];
+                break;
+            }
+        }
+
+        int a = trac->position / 40;
+        int b = next == NULL ? INT_MAX : next->position / 40;
+
+        if (a <= index && index < b) {
+            req->track_mix[1].track = trac;
+            req->track_mix[1].pos = index - a;
+            break;
+        }
+    }
 }
+
+static frame_request_t * reading = NULL;
+static int reading_pos = 0;
 
 /**
  * 1. this function is the only handler
@@ -139,56 +215,32 @@ static void test_timer_cb(void *arg) {
  *
  * so there's no data not played when abort. and as long as data available, play
  * it.
+ *
+ * each slice is either tick or tune. tick cannot be blocked since it is based
+ * on timer. tune may be blocked if there is no data to play.
  */
 static int read_cb(audio_element_handle_t el, char *buf, int len,
                    TickType_t wait_time, void *ctx) {
 
-// top:
-    if (data) {
-        if (len < data_length - data_played) {
-            memcpy(buf, &data[data_played], len);
-            data_played += len;
-        } else {
-            len = data_length - data_played;
-            memcpy(buf, &data[data_played], len);
-
-            message_t msg = {
-                .type = MSG_AUDIO_DONE,
-                .value = {.mem_block = {.length = data_length, .data = data}}};
-
-            xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-
-            data = NULL;
-            data_length = 0;
-            data_played = 0;
-            // no need to further "optimize", there is buffer.
+    if (slice_index == -1) {
+        for (int i = 0; i < 4; i++) {
+            frame_request_t *req = (frame_request_t *)heap_caps_malloc(
+                sizeof(frame_request_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            assert(req);
+            make_request(req);
+            xQueueSend(jug_in, &req, portMAX_DELAY);
+            ESP_LOGI(TAG, "initial jug_in request %d", i); 
         }
-        return len;
     }
 
-    while (1) {
-/**
-        message_t msg;
-        // xQueueReceive(audio_queue, &msg, portMAX_DELAY);
-
-        if (msg.type == MSG_BLINK_DATA) {
-            blinks_array_size = msg.value.blink_data.blinks_array_size;
-            blinks = msg.value.blink_data.blinks;
-            blink_start = esp_timer_get_time();
-            blink_next = 0;
-            esp_timer_start_periodic(blink_timer, 100000);
-
-            ESP_LOGI(TAG, "blinks array size: %d", blinks_array_size);
-
-        } else if (msg.type == MSG_AUDIO_DATA) {
-            data = msg.value.mem_block.data;
-            data_length = msg.value.mem_block.length;
-            goto top;
-        } else if (msg.type == MSG_BLINK_ABORT) {
-            blink_done();
-        }
-*/
+    if (!reading) {
+        xQueueReceive(jug_out, &reading, portMAX_DELAY); 
+        reading_pos = 0;
     }
+
+    memcpy(buf, reading, len); 
+    reading_pos++;
+    return len;
 }
 
 /**
@@ -199,32 +251,29 @@ static int read_cb(audio_element_handle_t el, char *buf, int len,
  * player has only one
  */
 void player(void *arg) {
+    int player_volume;
+
+    ESP_LOGI(TAG, "player task starts");
+
     play_context.lock = xSemaphoreCreateMutex();
 
-    esp_timer_init();
-    esp_timer_create_args_t args = {
-        .callback = &timer_cb,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "blink",
-    };
-    esp_timer_create(&args, &blink_timer);
+    jug_in = xQueueCreate(4, sizeof(frame_request_t *));
+    jug_out = xQueueCreate(4, sizeof(frame_request_t *));
 
-    esp_timer_create_args_t test_args = {
-        .callback = &test_timer_cb,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "test",
+    juggler_ports_t juggler_ports = {
+        .in = jug_in,
+        .out = jug_out,
     };
-    esp_timer_create(&test_args, &test_timer);
+
+    xTaskCreate(juggler, "juggler", 8192, &juggler_ports, 11, NULL);
 
     audio_pipeline_handle_t pipeline;
     audio_element_handle_t i2s_stream_writer;
 
-    ESP_LOGI(TAG, "[ 1 ] Start audio codec chip");
     audio_board_handle_t board_handle = audio_board_init();
     audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_BOTH,
                          AUDIO_HAL_CTRL_START);
 
-    int player_volume;
     audio_hal_get_volume(board_handle->audio_hal, &player_volume);
 
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -235,17 +284,10 @@ void player(void *arg) {
     i2s_cfg.type = AUDIO_STREAM_WRITER;
     i2s_cfg.i2s_config.sample_rate = 48000;
     i2s_stream_writer = i2s_stream_init(&i2s_cfg);
-    
-    // i2s_stream_set_clk(i2s_stream_writer, 48000, 16, 2);
-
+    i2s_stream_set_clk(i2s_stream_writer, 48000, 16, 2);
     audio_element_set_read_cb(i2s_stream_writer, read_cb, NULL);
-
-    ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
-    audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
-
-    ESP_LOGI(TAG, "[2.4] Link it together "
-                  "[mp3_music_read_cb]-->i2s_stream-->[codec_chip]");
-    const char *link_tag[1] = {"i2s"};
+    audio_pipeline_register(pipeline, i2s_stream_writer, "player-i2s");
+    const char *link_tag[1] = {"player-i2s"};
     audio_pipeline_link(pipeline, &link_tag[0], 1);
 
     ESP_LOGI(TAG, "[ 3 ] Initialize peripherals");
@@ -282,9 +324,8 @@ void player(void *arg) {
 
     audio_event_iface_set_listener(esp_periph_set_get_event_iface(set), evt);
 
-    audio_pipeline_run(pipeline);
-
-    esp_timer_start_periodic(test_timer, 1000000 * 5);
+    // audio_pipeline_run(pipeline);
+    // esp_timer_start_periodic(test_timer, 1000000 * 5);
 
     while (1) {
         audio_event_iface_msg_t msg;
@@ -298,10 +339,10 @@ void player(void *arg) {
             case CLOUD_CMD_STOP: {
             } break;
             case CLOUD_CMD_PLAY: {
+                ESP_LOGI(TAG, "cloud cmd PLAY arrived");
                 xSemaphoreTake(play_context.lock, portMAX_DELAY);
-
-                
-
+                ESP_LOGI(TAG, "run pipeline");
+                audio_pipeline_run(pipeline);
             } break;
             case TEST_TIMER_FIRE:
                 ESP_LOGI(TAG, "test timer counts %d", *((int *)msg.data));
@@ -378,5 +419,39 @@ void player(void *arg) {
 }
 
 void cloud_cmd_play() { emitter_emit(CLOUD_CMD_PLAY, NULL, 0); }
-
 void cloud_cmd_stop() { emitter_emit(CLOUD_CMD_STOP, NULL, 0); }
+
+void sprint_md5_digest(md5_digest_t* digest, char buf[MD5_HEX_STRING_SIZE]) {
+    int i;
+    for (i = 0; i < 16; i++) {
+        buf[2 * i + 0] = hex_char[digest->bytes[i] / 16];
+        buf[2 * i + 1] = hex_char[digest->bytes[i] % 16];
+    }
+    buf[2 * i] = '\0';
+}
+
+void print_frame_request(frame_request_t * req) {
+    const char* tag = pcTaskGetName(NULL);
+    char hex_buf[MD5_HEX_STRING_SIZE] = {0};
+
+    ESP_LOGI(tag, "frame: %d", req->index);
+    if (req->track_mix[0].track == NULL) {
+        ESP_LOGI(tag, "channel 0 no track");
+    } else {
+        track_t* trac = req->track_mix[0].track;
+        sprint_md5_digest(&trac->digest, hex_buf);
+        ESP_LOGI(tag,
+                 "channel 0 track: %s, size: %d, (requested) frame pos: %d",
+                 hex_buf, trac->size, req->track_mix[0].pos);
+    }
+
+    if (req->track_mix[1].track == NULL) {
+        ESP_LOGI(tag, "channel 1 no track");
+    } else {
+        track_t* trac = req->track_mix[1].track;
+        sprint_md5_digest(&trac->digest, hex_buf);
+        ESP_LOGI(tag,
+                 "channel 0 track: %s, size: %d, (requested) frame pos: %d",
+                 hex_buf, trac->size, req->track_mix[1].pos);
+    }
+}

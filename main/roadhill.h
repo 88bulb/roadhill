@@ -1,3 +1,6 @@
+#ifndef _ROAD_HILL_HOUSE_
+#define _ROAD_HILL_HOUSE_
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -36,6 +39,12 @@
 #define META_OFFSET (((uint64_t)1 << BUCKET_BITS) * BUCKET_SIZE) // 4MB
 #define DATA_OFFSET (META_OFFSET * 2)                            // 8MB
 #define WLOG_OFFSET (META_OFFSET / 2)                            // 2MB
+#define URL_BUFFER_SIZE (512)
+#define TRACK_NAME_LENGTH (32)
+#define FILENAME_BUFFER_SIZE (40)
+
+#define MD5_HEX_STRING_SIZE (16 * 2 + 1)
+#define MD5_HEX_BUF_SIZE    (16 * 2 + 1)
 
 typedef struct play_context play_context_t;
 typedef struct fetch_context fetch_context_t;
@@ -43,28 +52,56 @@ typedef struct pacman_context pacman_context_t;
 typedef struct picman_context picman_context_t;
 
 extern QueueHandle_t play_context_queue;
-extern QueueHandle_t juggler_queue;
 extern QueueHandle_t tcp_send_queue;
-//extern QueueHandle_t audio_queue;
 
 extern const char hex_char[16];
 
+/*
+ * ota command (url)
+ */
 typedef struct {
     char url[1024];
 } ota_command_data_t;
 
+/*
+ * md5 type
+ */
 typedef struct {
     uint8_t bytes[16];
 } md5_digest_t;
 
+/*
+ * track
+ */
 typedef struct {
     md5_digest_t digest;
+    /* mp3 file size */
     int size;
+
+    /* audio length, in units of 10 milliseconds (centiseconds).
+     * for 48000Hz sample rate, 16bit and 2 channels, each unit
+     * has 480 * 4 = 1920 bytes.
+     * length is not provided by cloud, it is provided by juggler.
+     */
+    int length;
+
+    /*
+     * position in milliseconds
+     */
     int position;
+
+    /*
+     * begin
+     */
     int begin;
     int end;
     int chan;
 } track_t;
+
+typedef struct {
+    track_t* track;
+    int pos;
+} track_mix_t;
 
 typedef struct {
     int time;
@@ -122,16 +159,14 @@ typedef enum {
     MSG_AUDIO_DONE,
 } message_type_t;
 
-typedef struct {
+typedef struct message {
     message_type_t type;
-
     /**
      * most components are singleton，and type clearly encoded the
      * source and target of a message. The only exception is
      * fetcher, which may have multiple instance in an optimized implementation.
      */
     void *from;
-
     union {
         fetch_error_t fetch_error;
         mem_block_t mem_block;
@@ -140,20 +175,39 @@ typedef struct {
     } value;
 } message_t;
 
-#define URL_BUFFER_SIZE (512)
-#define TRACK_NAME_LENGTH (32)
-#define FILENAME_BUFFER_SIZE (40)
+typedef struct juggler_ports {
+    QueueHandle_t in;
+    QueueHandle_t out;
+} juggler_ports_t;
 
-struct fetch_context {
-    // TODO use pointer
-    char url[URL_BUFFER_SIZE];
-    md5_digest_t digest;
-    int track_size;
-    uint32_t play_index;
-    bool play_started;
+typedef enum juggler_response {
+    JUG_REQ_FULFILLED,  // succeeded
+    JUG_REQ_REJECTED,   // failed, including cancelled.
+} juggler_response_t;
 
-    QueueHandle_t input;
-};
+/*
+ * each request request fixed number of slices
+ *
+ * each slice is 8KiB in size, containing 15 sectors of pcm data
+ * and 1 sector of metadata, volume and fft results perhaps.
+ * 15 * 512 pcm data contains 15 * 512 / 4 = 1920 samples, which
+ * in turn translates into 1920 / 48000 = 0.04s. Which means the *frame* rate
+ * is 25fps, if the metadata is used for displaying a spectrum visualizer.
+ * 
+ * the buffer size must be a multiple of 8192.
+ */
+typedef struct {
+    // player set this index incrementally
+    int index;
+    // juggler set this value
+    juggler_response_t res;
+    // point to the same string in play_context
+    const char* url;
+    // if not used, set track (track_t*) to NULL
+    track_mix_t track_mix[2];
+
+    char buf[8192]; 
+} frame_request_t;
 
 struct picman_context {
     QueueHandle_t in;
@@ -161,12 +215,10 @@ struct picman_context {
 };
 
 typedef struct {
-    char url[URL_BUFFER_SIZE];
-    md5_digest_t digest;
+    char *url;
+    md5_digest_t *digest;
     int track_size;
-} picman_inmsg_data_t;
-
-typedef picman_inmsg_data_t *picman_inmsg_handle_t;
+} picman_inmsg_t;
 
 typedef struct {
     char *data;
@@ -191,12 +243,17 @@ typedef struct {
 } pacman_inmsg_t;
 
 typedef enum {
-    PCM_STREAM_DATA,
-    PCM_STREAM_ERROR,
-    PCM_STREAM_FINISH
+    PCM_IN_DRAIN,
+    PCM_OUT_DATA,
+    PCM_OUT_ERROR,
+    PCM_OUT_FINISH
 } pacman_outmsg_type_t;
 
+/*
+ * 
+ */
 typedef struct {
+    pacman_outmsg_type_t type;
     char *data;
     uint32_t len;
 } pacman_outmsg_t;
@@ -305,11 +362,17 @@ header describes:
 
 #define MMCFS_MAX_BITARRAY_SIZE (16 * 1024 * 8)
 
-typedef struct {
+typedef struct mmcfs {
     uint64_t log_start;
     uint64_t log_sect; // twice bucket_sect
+
+    /* starting sector of bucket */
     uint64_t bucket_start;
+    
+    /* how much sectors for a bucket */
     uint64_t bucket_sect;
+
+    /* total buckets number, in current implementation, 4096 */
     uint64_t bucket_count;
     uint64_t block_start;
     uint64_t block_sect;
@@ -362,15 +425,14 @@ _Static_assert(sizeof(mmcfs_superblock_t) == 512,
  *      packet_position: first or last
  */
 typedef struct __attribute__((packed)) {
-    // for
-    uint8_t self[16];
+    md5_digest_t self;
 
     // for mp3 file, this links to pcm;
     // for pcm file, this links to original mp3 file.
     // there is no need to have an "option field" denoting
     // whether this link is used or not, since a "danling"
     // reference is allowed.
-    uint8_t link[16];
+    md5_digest_t link;
 
     // access is a global monotonously increasing number
     // it is roughly equivalent to last access time, the larger, the latter
@@ -408,4 +470,12 @@ _Static_assert(sizeof(mmcfs_bucket_t) == 1024, "mmc_bucket_t size incorrect");
 extern play_context_t play_context;
 void cloud_cmd_play();
 void cloud_cmd_stop();
+
+void print_frame_request();
+void sprint_md5_digest(md5_digest_t* digest, char* buf);
+
+char* make_url(char* path, md5_digest_t* digest);
+
+#endif // _ROAD_HILL_HOUSE_
+
 

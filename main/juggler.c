@@ -14,9 +14,12 @@
 
 #include "esp_http_client.h"
 
+#include "mmcfs.h"
 #include "roadhill.h"
 
 #define FETCH_INPUT_QUEUE_SIZE (4)
+
+static const char* TAG = "juggler";
 
 #define ALLOC_MAP_SIZE (BLOCK_NUM_BOUND * BLOCK_NUM_FRACT)
 
@@ -55,133 +58,7 @@ void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
     strlcat(tracks_url, str, size);
 }
 
-/**
- * fetcher downloads track data and send them back to juggler.
- * fetcher reads mem_block_t object out of context.
- */
-/**
-static void fetcher(void *arg) {
-    const char *TAG = "fetcher"; // TODO add file name?
-    fetch_context_t *ctx = (fetch_context_t *)arg;
-    esp_err_t err;
 
-    ESP_LOGI(TAG, "fetching: %s", ctx->url);
-
-    esp_http_client_config_t config = {
-        .url = ctx->url,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if ((err = esp_http_client_open(client, 0)) != ESP_OK) {
-        ESP_LOGI(TAG, "fetch error, failed to open http client (%d, %s)", err,
-                 esp_err_to_name(err));
-
-        message_t msg = {.type = MSG_FETCH_ERROR,
-                         .from = ctx,
-                         .value = {.fetch_error = {.err = err, .data = NULL}}};
-        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int content_length = esp_http_client_fetch_headers(client);
-    // ULLONG_MAX in limits.h
-    if (content_length == -1) {
-        ESP_LOGI(TAG, "server does not respond content-length in header");
-        content_length = ctx->track_size;
-    } else if (content_length != ctx->track_size) {
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-
-        ESP_LOGI(TAG, "fetch error, size mismatch, expected: %d, actual: %d",
-                 ctx->track_size, content_length);
-
-        message_t msg = {
-            .type = MSG_FETCH_ERROR,
-            .from = ctx,
-            .value = {.fetch_error = {.err = 0xF001, // define ERROR in header
-                                      .data = NULL}}};
-        xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-        vTaskDelete(NULL);
-        return;
-    } else {
-        ESP_LOGI(TAG, "server responds a content-length of %d bytes",
-                 content_length);
-    }
-
-    int total_read_len = 0, read_len;
-    while (1) {
-        message_t msg;
-        xQueueReceive(ctx->input, &msg, portMAX_DELAY);
-        if (msg.type == MSG_FETCH_ABORT) {
-            message_t msg = {.type = MSG_FETCH_ABORTED, .from = ctx};
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-            ESP_LOGI(TAG, "fetch aborted");
-            xQueueSend(juggler_queue, &msg, portMAX_DELAY);
-            vTaskDelete(NULL);
-            return;
-        }
-
-        assert(msg.type == MSG_FETCH_MORE);
-        assert(msg.value.mem_block.data);
-
-        msg.value.mem_block.play_index = ctx->play_index;
-        char *data = msg.value.mem_block.data;
-        read_len = esp_http_client_read(client, data, MEM_BLOCK_SIZE);
-        total_read_len += read_len;
-        if (read_len > 0) {
-            if (total_read_len > ctx->track_size) {
-                // TODO oversize error
-            } else if (total_read_len == ctx->track_size) {
-                message_t reply = {0};
-                reply.type = MSG_FETCH_FINISH;
-                reply.from = ctx;
-                reply.value.mem_block.length = read_len;
-                reply.value.mem_block.data = data;
-                xQueueSend(juggler_queue, &reply, portMAX_DELAY);
-                esp_http_client_close(client);
-                esp_http_client_cleanup(client);
-
-                ESP_LOGI(
-                    TAG,
-                    "fetch finished with last block of data size: %d bytes",
-                    read_len);
-
-                vTaskDelete(NULL);
-                return;
-            } else {
-                message_t reply = {0};
-                reply.type = MSG_FETCH_MORE_DATA;
-                reply.from = ctx;
-                reply.value.mem_block.length = read_len;
-                reply.value.mem_block.data = data;
-                xQueueSend(juggler_queue, &reply, portMAX_DELAY);
-            }
-        } else if (read_len == 0) {
-            message_t reply = {.type = MSG_FETCH_FINISH, .from = ctx};
-            reply.value.mem_block.length = 0;
-            reply.value.mem_block.data = data; // don't forget this
-            xQueueSend(juggler_queue, &reply, portMAX_DELAY);
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-
-            ESP_LOGI(TAG, "fetch finished without extra data");
-
-            vTaskDelete(NULL);
-            return;
-        } else {
-            // TODO
-        }
-    }
-
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    ESP_LOGI(TAG, "finished");
-
-    vTaskDelete(NULL);
-} */
 
 void die_another_day() {
     // 24 hours
@@ -193,9 +70,18 @@ void die_another_day() {
  * juggler task
  */
 void juggler(void *arg) {
-    const char *TAG = "juggler";
     esp_err_t err;
     message_t msg;
+
+    md5_digest_t md5;
+    md5_digest_t *fetching = NULL;
+    md5_digest_t *decoding = NULL;
+
+    frame_request_t *req = NULL;
+    frame_request_t *req_array[4] = {0};
+    int req_count = 0;
+
+    ESP_LOGI(TAG, "juggler task starts"); 
 
     err = init_mmcfs();
     if (err) {
@@ -203,23 +89,73 @@ void juggler(void *arg) {
         die_another_day();
     }
 
+    juggler_ports_t *ports = (juggler_ports_t *)arg;
+
+    QueueSetMemberHandle_t q;
+    
+    QueueHandle_t jug_in = ports->in;
+    QueueHandle_t jug_out = ports->out;
     QueueHandle_t pcm_in = xQueueCreate(8, sizeof(pacman_inmsg_t));
     QueueHandle_t pcm_out = xQueueCreate(8, sizeof(pacman_outmsg_t)); 
+    QueueHandle_t pic_in = xQueueCreate(2, sizeof(picman_inmsg_t));
+    QueueHandle_t pic_out = xQueueCreate(8, sizeof(picman_outmsg_t));
+
+    QueueSetHandle_t qset = xQueueCreateSet(8);
+    xQueueAddToSet(jug_in, qset);
+    xQueueAddToSet(pcm_out, qset);
+    xQueueAddToSet(pic_out, qset);
+
     pacman_context_t pacman_ctx = {
         .in = pcm_in,
         .out = pcm_out,
     };
-
     xTaskCreate(pacman, "pacman", 4096, &pacman_ctx, 11, NULL); 
 
-    QueueHandle_t pic_in = xQueueCreate(8, sizeof(picman_inmsg_handle_t));
-    QueueHandle_t pic_out = xQueueCreate(8, sizeof(picman_outmsg_t));
     picman_context_t picman_ct = {
         .in = pic_in,
         .out = pic_out,
     };
-
     xTaskCreate(picman, "picman", 4096, &picman_ct, 12, NULL);
+
+forever_loop:
+    q = xQueueSelectFromSet(qset, portMAX_DELAY);
+    if (q == jug_in) {
+        ESP_LOGI(TAG, "jug_in input message");
+        xQueueReceive(q, &req, 0); // TODO error handling?
+
+        print_frame_request(req);
+
+        track_t *trac = req->track_mix[0].track;
+        if (trac) {
+            mmcfs_finfo_t info;
+            int res = mmcfs_stat(&trac->digest, &info);
+
+            assert(res != EINVAL);
+
+            if (res == -ENOENT) {
+                ESP_LOGI(TAG, "mmcfs_stat ENOENT");
+
+                req_array[req_count] = req;
+                req_count++;
+                if (req_count == 1) {
+                    picman_inmsg_t cmd = {0};
+                    cmd.url = req->url;
+                    cmd.digest = &req->track_mix[0].track->digest;
+                    cmd.track_size = req->track_mix[0].track->size;
+                    xQueueSend(pic_in, &cmd, portMAX_DELAY);
+                }
+            } else {
+            }
+        }
+    } else if (q == pic_out) {
+        if (pdTRUE == uxQueueSpacesAvailable(pcm_in)) {
+            picman_outmsg_t outmsg;
+            xQueueReceive(pic_out, &outmsg, 0);
+             
+        }
+    } else if (q == pcm_out) {
+    }
+    goto forever_loop;
 
     vTaskDelay(portMAX_DELAY);
 

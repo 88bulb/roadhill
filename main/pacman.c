@@ -45,7 +45,9 @@ static int total_read = 0;
 static int mp3_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx) {
 
     QueueHandle_t in = ((pacman_context_t *)ctx)->in;
+    QueueHandle_t out = ((pacman_context_t *)ctx)->out;
     pacman_inmsg_t msg;
+    pacman_outmsg_t outmsg;
 
     while (read_buf == NULL) {
         if (pdTRUE != xQueueReceive(in, &msg, portMAX_DELAY)) {
@@ -56,6 +58,11 @@ static int mp3_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t
         if (msg.data == NULL) {
             return 0;
         }
+
+        outmsg.type = PCM_IN_DRAIN;
+        outmsg.data = NULL;
+        outmsg.len = 0; 
+        xQueueSendToFront(out, &outmsg, 0);
 
         read_buf = msg.data;
         read_buf_len = msg.len;
@@ -87,6 +94,8 @@ static int64_t total_written_time = 0;
  * write given data to mem block and send to out queue when full.
  */
 static int rsp_write_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx) {
+    pacman_outmsg_t outmsg = {0};
+
     if (write_buf == NULL) {
         write_buf = (char *)malloc(WRITE_BUF_SIZE);
         memcpy(write_buf, buf, len);
@@ -105,8 +114,10 @@ static int rsp_write_cb(audio_element_handle_t el, char *buf, int len, TickType_
              * full
              */
             QueueHandle_t out = ((pacman_context_t *)ctx)->out;
-            pacman_outmsg_t msg = {.data = write_buf, .len = WRITE_BUF_SIZE};
-            xQueueSend(out, &msg, portMAX_DELAY);
+            outmsg.type = PCM_OUT_DATA;
+            outmsg.data = write_buf;
+            outmsg.len = WRITE_BUF_SIZE;
+            xQueueSend(out, &outmsg, portMAX_DELAY);
             write_buf = NULL;
             write_buf_pos = -1;
 
@@ -230,16 +241,25 @@ void pacman(void *ctx) {
                 ESP_LOGI(TAG, "mp3_decoder finished");
             } else if ((void *)msg.source == rsp_filter) {
                 ESP_LOGI(TAG, "rsp_filter finished");
+
+                pacman_outmsg_t outmsg = {0};
                 QueueHandle_t out = ((pacman_context_t *)ctx)->out;
-                pacman_outmsg_t msg = {.data = write_buf, .len = write_buf_pos};
-                xQueueSend(out, &msg, portMAX_DELAY);
+
                 if (write_buf != NULL) {
+                    outmsg.type = PCM_OUT_DATA;
+                    outmsg.data = write_buf;
+                    outmsg.len = write_buf_pos;
+                    xQueueSend(out, &outmsg, portMAX_DELAY);
+
                     write_buf = NULL;
                     write_buf_pos = -1;
-                    msg.data = write_buf;
-                    msg.len = write_buf_pos;
-                    xQueueSend(out, &msg, portMAX_DELAY);
                 }
+
+                outmsg.type = PCM_OUT_FINISH;
+                outmsg.data = NULL;
+                outmsg.len = 0;
+
+                xQueueSend(out, &outmsg, portMAX_DELAY);
 
                 /*
                  * ESP_LOGI(TAG, "totally written %d bytes, total

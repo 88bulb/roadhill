@@ -41,7 +41,11 @@ fs.cp('build/roadhill.bin', 'files/roadhill.bin', err => {
                 // tracks_url: 'http://shinuojbs-1306173101.cos.ap-shanghai.myqcloud.com/sgd_audio',
                 tracks: [{
                   name: '8b76c5faf3fd66b66d5a36e6ffe9e7bb.mp3',
-                  size: 6817965
+                  size: 6817965,
+                  position: 0,
+                  begin: 0,
+                  end: -1,
+                  chan: 0
                 }],
                 blinks: [
                   {
