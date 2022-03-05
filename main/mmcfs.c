@@ -9,8 +9,6 @@
 #include "driver/sdmmc_host.h"
 #include "diskio_impl.h"
 #include "diskio_sdmmc.h"
-#include "vfs_fat_internal.h"
-#include "esp_vfs_fat.h"
 
 #include "roadhill.h"
 #include "mmcfs.h"
@@ -30,9 +28,9 @@ static const char *TAG = "mmcfs";
  * 2. the first 12 bits of a null file is not zero. it's bucket index.
  *    for example: if the bucket index is 1000, the hex value is 0x03e8, and
  *    shift 12 bits to left we got 0x3e80. So the first byte of a null file
- *    in this bucket is 0x3e, the secod byte is 0x80, and all remaining 
+ *    in this bucket is 0x3e, the secod byte is 0x80, and all remaining
  *    bytes are 0x00.
- * 3. write log has two buckets. the former is the bucket being written. the 
+ * 3. write log has two buckets. the former is the bucket being written. the
  *    latter is bitwise NOT-ed.
  */
 
@@ -88,7 +86,7 @@ static bool mmcfs_file_is_pcm(const mmcfs_file_t *file) {
 static void mmcfs_file_nullify(mmcfs_file_t *file, const md5_digest_t *digest) {
     memset(file, 0, sizeof(mmcfs_file_t));
     file->self.bytes[0] = digest->bytes[0];
-    file->self.bytes[1] = digest->bytes[1] & 0xf0; 
+    file->self.bytes[1] = digest->bytes[1] & 0xf0;
 }
 
 static bool mmcfs_file_digest_match(const mmcfs_file_t *file,
@@ -97,7 +95,7 @@ static bool mmcfs_file_digest_match(const mmcfs_file_t *file,
 }
 
 static uint16_t mmcfs_bucket_index(const md5_digest_t *digest) {
-    const uint8_t* bytes = digest->bytes;
+    const uint8_t *bytes = digest->bytes;
     return (((uint16_t)bytes[0]) << 4) + (bytes[1] >> 4);
 }
 
@@ -109,11 +107,9 @@ static size_t mmcfs_bucket_start_sector(const md5_digest_t *digest) {
 
 static size_t mmcfs_bucket_sector_count() { return fs->bucket_sect; }
 
-static int mmcfs_max_files_per_bucket() {
+static int mmcfs_bucket_max_files() {
     return fs->bucket_sect * 512 / sizeof(mmcfs_file_t);
 }
-
-
 
 /*
  * return index, or -ENOENT
@@ -135,7 +131,7 @@ static int mmcfs_bucket_find_file(const mmcfs_bucket_t *bucket,
 /*
  * read a bucket into iobuf
  */
-static int mmcfs_read_bucket(const md5_digest_t *digest) {
+static int mmcfs_bucket_read(const md5_digest_t *digest) {
     size_t start_sector = mmcfs_bucket_start_sector(digest);
     size_t sector_count = mmcfs_bucket_sector_count();
     esp_err_t err = sdmmc_read_sectors(card, iobuf, start_sector, sector_count);
@@ -150,13 +146,13 @@ static int mmcfs_read_bucket(const md5_digest_t *digest) {
  */
 static int mmcfs_bucket_update(mmcfs_bucket_t *bucket) {
 
-    if (bucket != NULL && bucket != iobuf) {
+    if (bucket != NULL && bucket != (mmcfs_bucket_t *)iobuf) {
         memcpy(iobuf, bucket, sizeof(mmcfs_bucket_t));
     }
 
-    mmcfs_bucket_t* log = (mmcfs_bucket_t*)iobuf;
-    uint32_t* c0 = (uint32_t*)&log[0];
-    uint32_t* c1 = (uint32_t*)&log[1]; 
+    mmcfs_bucket_t *log = (mmcfs_bucket_t *)iobuf;
+    uint32_t *c0 = (uint32_t *)&log[0];
+    uint32_t *c1 = (uint32_t *)&log[1];
     for (int i = 0; i < sizeof(mmcfs_bucket_t) / sizeof(uint32_t); i++) {
         c1[i] = ~c0[i];
     }
@@ -173,7 +169,7 @@ static int mmcfs_bucket_update(mmcfs_bucket_t *bucket) {
                               mmcfs_bucket_sector_count());
     if (err != ESP_OK) {
         return -EIO;
-    } 
+    }
 
     return 0;
 }
@@ -184,16 +180,16 @@ static int mmcfs_bucket_update(mmcfs_bucket_t *bucket) {
  */
 static int mmcfs_bucket_remove_file(const md5_digest_t *digest,
                                     bool remove_linked_pcm) {
-    int ret = mmcfs_read_bucket(digest);
+    int ret = mmcfs_bucket_read(digest);
     if (ret < 0)
         return ret;
 
-    mmcfs_bucket_t* buc = (mmcfs_bucket_t*)iobuf;
+    mmcfs_bucket_t *buc = (mmcfs_bucket_t *)iobuf;
 
     // find returns -ENOENT or index
     int index = mmcfs_bucket_find_file(buc, digest);
     if (index == -ENOENT) {
-        return 0;    
+        return 0;
     } else if (index < 0) {
         return index;
     }
@@ -205,10 +201,10 @@ static int mmcfs_bucket_remove_file(const md5_digest_t *digest,
         if (r < 0)
             return r;
 
-        return mmcfs_bucket_remove_file(digest, false); 
+        return mmcfs_bucket_remove_file(digest, false);
     }
 
-    int max_files = mmcfs_max_files_per_bucket();
+    int max_files = mmcfs_bucket_max_files();
     for (int i = index; i < max_files; i++) {
         if (i < max_files - 1) {
             buc->files[i] = buc->files[i + 1];
@@ -222,9 +218,7 @@ static int mmcfs_bucket_remove_file(const md5_digest_t *digest,
 
 /* These three functions are UNSAFE. Callers must check range for themselves.
  */
-bool test_bit(int i) {
-    return !!(bit_array[i / 8] & ((uint8_t)1 << (i % 8)));
-}
+bool test_bit(int i) { return !!(bit_array[i / 8] & ((uint8_t)1 << (i % 8))); }
 
 void set_bit(int i) { bit_array[i / 8] |= (1 << (i % 8)); }
 
@@ -494,7 +488,7 @@ esp_err_t init_fs() {
         superblock = NULL;
         return err;
     }
-    
+
     // erasing not log, it is not bitwise NOT-ed, which means the log is invalid
     err =
         sdmmc_write_sectors(card, bucket, log_start + bucket_sect, bucket_sect);
@@ -508,7 +502,7 @@ esp_err_t init_fs() {
     // erase buckets (metadata table)
     for (uint16_t i = 0; i < bucket_count; i++) {
         bucket[0] = i >> 4;
-        bucket[1] = i << 4; 
+        bucket[1] = i << 4;
         err = sdmmc_write_sectors(card, bucket, bucket_start + i * bucket_sect,
                                   bucket_sect);
         if (err != ESP_OK) {
@@ -630,6 +624,8 @@ static esp_err_t init_falloc_bitmap() {
     return ESP_OK;
 }
 
+uint32_t mmcfs_block_size() { return fs->block_sect * 512; }
+
 int convert_bytes_to_blocks(uint64_t size) {
     int block_size = fs->block_sect * 512;
     return (size % block_size == 0) ? size / block_size : size / block_size + 1;
@@ -654,7 +650,7 @@ uint32_t allocate_blocks(uint32_t blocks) {
             }
             return start;
         }
-    } 
+    }
     return -1;
 }
 
@@ -727,14 +723,13 @@ int mmcfs_stat(const md5_digest_t *digest, mmcfs_finfo_t *finfo) {
  * mp3)
  */
 int mmcfs_pour_full_bucket(const md5_digest_t *digest) {
-    size_t start_sector = mmcfs_bucket_start_sector(digest);
-    size_t sector_count = mmcfs_bucket_sector_count();
-    esp_err_t err = sdmmc_read_sectors(card, iobuf, start_sector, sector_count);
-    if (err != ESP_OK) {
-        return -EIO;
+
+    int ret = mmcfs_bucket_read(digest);
+    if (ret < 0) {
+        return ret;
     }
 
-    int max_files = mmcfs_max_files_per_bucket();
+    int max_files = mmcfs_bucket_max_files();
     mmcfs_bucket_t *buc = (mmcfs_bucket_t *)iobuf;
     if (mmcfs_file_is_null(&buc->files[max_files - 1]))
         return 0;
@@ -748,75 +743,71 @@ int mmcfs_pour_full_bucket(const md5_digest_t *digest) {
         }
     }
 
-    mmcfs_bucket_t *bucket = (mmcfs_bucket_t *)malloc(sizeof(mmcfs_bucket_t));
-    if (bucket == NULL) {
-        return -ENOMEM;
-    }
-    memset(bucket, 0, sizeof(mmcfs_bucket_t));
-    return 0;
+    md5_digest_t target = buc->files[i].self;
+    return mmcfs_bucket_remove_file(&target, true);
 }
 
 /*
  * create a file inside a bucket
  */
-int mmcfs_create_mp3_file_ll(const md5_digest_t *self, const md5_digest_t *link,
-                             uint32_t last_access, uint32_t block_start,
-                             uint32_t block_end, uint32_t size) {
-    mmcfs_file_t *file = (mmcfs_file_t *)malloc(sizeof(mmcfs_file_t));
-    if (file == NULL) {
-        return -ENOMEM;
-    }
-    memset(file, 0, sizeof(mmcfs_file_t));
-    file->self = *self;
-    if (link) {
-        file->link = *link;
+int mmcfs_create_file_ll(const md5_digest_t *mp3_digest,
+                         const md5_digest_t *pcm_digest, uint32_t block_start,
+                         uint32_t block_end, uint32_t size,
+                         mmcfs_file_type_t type, mmcfs_file_subtype_t subtype) {
+
+    int ret = mmcfs_pour_full_bucket(mp3_digest);
+    if (ret < 0) {
+        return ret;
     }
 
-    file->access = last_access;
-    file->block_start = block_start;
-    file->block_end = block_end;
-    file->size = size;
-    file->type = 1; // mp3
-
-    mmcfs_bucket_t *bucket = (mmcfs_bucket_t *)malloc(sizeof(mmcfs_bucket_t));
-    if (bucket == NULL) {
-        free(file);
-        return -ENOMEM;
+    // read bucket into iobuf
+    ret = mmcfs_bucket_read(mp3_digest);
+    if (ret < 0) {
+        return ret;
     }
 
-    size_t start_sector = mmcfs_bucket_start_sector(self);
-    size_t sector_count = fs->bucket_sect;
-    esp_err_t err = sdmmc_read_sectors(card, iobuf, start_sector, sector_count); 
-    if (err != ESP_OK) {
-        free(file);
-        free(bucket);         
-        return -EIO;
+    // shift one place forward
+    int max_files = mmcfs_bucket_max_files();
+    mmcfs_bucket_t *buc = (mmcfs_bucket_t *)iobuf;
+    for (int i = max_files - 1; i > 0; i--) {
+        buc[i] = buc[i - 1];
     }
 
-    memcpy(bucket, iobuf, sizeof(mmcfs_bucket_t)); 
+    // now buc->files[0] is empty
+    memset(&buc->files[0], 0, sizeof(mmcfs_file_t));
+    buc->files[0].self = *mp3_digest;
+    buc->files[0].link = *pcm_digest;
+    buc->files[0].access = last_access;
+    buc->files[0].block_start = block_start;
+    buc->files[0].block_end = block_end;
+    buc->files[0].size = size;
+    buc->files[0].type = type;
+    buc->files[0].subtype = subtype;
 
-    int max_count = sizeof(mmcfs_bucket_t) / sizeof(mmcfs_file_t);
-    int i;
-    for (i = 0; i < max_count; i++) {
-        if (mmcfs_file_is_null(&bucket->files[i])) {
-            break;
-        }
+    ret = mmcfs_bucket_update(NULL);
+    if (ret < 0) {
+        return ret;
     }
 
-    if (i < max_count) {
-        
-    }
-    
+    last_access++;
     return 0;
 }
 
 struct mmcfs_file_context {
+    bool finalized;
+
     md5_digest_t digest;
-    uint64_t size;
+    md5_digest_t calculated_mp3_digest;
+    md5_digest_t calculated_pcm_digest;
+
+    uint32_t mp3_size;
     uint32_t mp3_start;
     uint32_t mp3_blocks;
+    uint32_t pcm_estimated_size;
+    uint32_t pcm_actual_size;
     uint32_t pcm_start;
-    uint32_t pcm_blocks;
+    uint32_t pcm_estimated_blocks;
+    uint32_t pcm_actual_blocks;
 
     uint32_t mp3_written;
     uint32_t pcm_written;
@@ -825,6 +816,13 @@ struct mmcfs_file_context {
     md5_context_t pcm_md5_ctx;
 };
 
+
+/*
+ * create_file must starts from wctx = NULL
+ * s0 -> s1, allocate a file creation context, allocate bits (blocks)
+ * all writing must happen in s1 state, if error, file handle is invalid
+ * s1 -> s0 by commit, and wctx recycled, also unused blocks
+ */
 static mmcfs_file_context_t *wctx = NULL;
 
 /*
@@ -839,21 +837,25 @@ mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint64_t size) {
     int total_blocks = mp3_blocks + est_pcm_blocks;
 
     uint32_t start = allocate_blocks(total_blocks);
-    if (start == -1)
-        return NULL;
+    if (start == -1) {
+        return NULL; // this is critical error !!! TODO
+    }
 
     wctx = (mmcfs_file_context_t *)malloc(sizeof(mmcfs_file_context_t));
     if (wctx) {
+        wctx->finalized = false;
         memcpy(&wctx->digest, digest, sizeof(wctx->digest));
-        wctx->size = size;
+        wctx->mp3_size = size;
         wctx->mp3_start = start;
         wctx->mp3_blocks = mp3_blocks;
+        wctx->pcm_estimated_size = est_pcm_size;
+        wctx->pcm_actual_size = 0;
         wctx->pcm_start = start + mp3_blocks;
-        wctx->pcm_blocks = est_pcm_blocks;
+        wctx->pcm_estimated_blocks = est_pcm_blocks;
+        wctx->pcm_actual_blocks = 0;
 
         wctx->mp3_written = 0;
         wctx->pcm_written = 0;
-
         esp_rom_md5_init(&wctx->mp3_md5_ctx);
         esp_rom_md5_init(&wctx->pcm_md5_ctx);
     }
@@ -861,11 +863,11 @@ mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint64_t size) {
     return wctx;
 }
 
-int mmcfs_write_mp3(mmcfs_file_handle_t file, char* buf, size_t len) {
+int mmcfs_write_mp3(mmcfs_file_handle_t file, char *buf, size_t len) {
     assert(0 < len && len <= PIC_BLOCK_SIZE);
     memcpy(iobuf, buf, len);
 
-    size_t start_sector = fs->block_start; // point to first block
+    size_t start_sector = fs->block_start;            // point to first block
     start_sector += file->mp3_start * fs->block_sect; // move to mp3 start
     start_sector += file->mp3_written / 512;
     size_t sector_count = (len + 511) / 512;
@@ -873,13 +875,13 @@ int mmcfs_write_mp3(mmcfs_file_handle_t file, char* buf, size_t len) {
     sdmmc_write_sectors(card, iobuf, start_sector, sector_count);
     esp_rom_md5_update(&file->mp3_md5_ctx, iobuf, len);
 
-    file->mp3_written += len; 
-    // ESP_LOGI(TAG, "mmcfs_write_mp3: %u, %u", len, file->mp3_written); 
+    file->mp3_written += len;
+    // ESP_LOGI(TAG, "mmcfs_write_mp3: %u, %u", len, file->mp3_written);
     return 0;
 }
 
 /*
- * 
+ *
  */
 int mmcfs_write_pcm(mmcfs_file_handle_t file, char *buf, size_t len) {
     assert(len == FRAME_BUF_SIZE);
@@ -899,28 +901,72 @@ int mmcfs_write_pcm(mmcfs_file_handle_t file, char *buf, size_t len) {
     return 0;
 }
 
-/*
- *  
- */
-int mmcfs_commit_file(mmcfs_file_handle_t file) {
-    ESP_LOGI(TAG, "mmcfs_close_file, mp3: %d, pcm: %u", file->mp3_written,
-             file->pcm_written);
-    md5_digest_t digest;
-    char buf[MD5_HEX_STRING_SIZE];
-
-    sprint_md5_digest(&file->digest, buf, 0);
-    ESP_LOGI(TAG, "mmcfs_close_file, digest: %s, size: %llu, written: %u", buf,
-             file->size, file->mp3_written);
-
-    esp_rom_md5_final(digest.bytes, &file->mp3_md5_ctx);
-    sprint_md5_digest(&digest, buf, 0);
-    ESP_LOGI(TAG, "calculated mp3 digest (md5): %s", buf);
-
-    esp_rom_md5_final(digest.bytes, &file->pcm_md5_ctx);
-    sprint_md5_digest(&digest, buf, 0);
-    ESP_LOGI(TAG, "calculated pcm digest (md5, data only): %s", buf);
-
-    return 0;
+static void mmcfs_finalize_file(mmcfs_file_handle_t file) {
+    file->finalized = true;
+    file->pcm_actual_size = file->pcm_written;
+    file->pcm_actual_blocks = file->pcm_written / mmcfs_block_size();
+    esp_rom_md5_final(file->calculated_mp3_digest.bytes, &file->mp3_md5_ctx);
+    esp_rom_md5_final(file->calculated_pcm_digest.bytes, &file->pcm_md5_ctx);
 }
 
+/*
+ *
+ */
+int mmcfs_commit_file(mmcfs_file_handle_t file) {
 
+    mmcfs_finalize_file(file);
+
+    char *p1 = (char *)iobuf;
+    sprint_md5_digest(&file->digest, p1, 0);
+    char *p2 = p1 + strlen(p1) + 1;
+    sprint_md5_digest(&file->calculated_mp3_digest, p2, 0);
+    char *p3 = p2 + strlen(p2) + 1;
+    sprint_md5_digest(&file->calculated_pcm_digest, p3, 0);
+    bool mp3_digest_match = memcmp(&file->digest, &file->calculated_mp3_digest,
+                                   sizeof(md5_digest_t)) == 0;
+    bool mp3_size_match = (file->mp3_size == file->mp3_written);
+    ESP_LOGI(TAG,
+             "committing mp3+pcm file. \n"
+             "\tmp3: %s (expected), %s (actual), %s; "
+             "size: %u (expected), %u (actual), %s; "
+             "starting block: %u, blocks: %u\n"
+             "\tpcm: %s, size: %u (actual), %u (estimated); starting "
+             "block: %u, blocks: %u (actual), %u (estimated)",
+             p1, p2, (mp3_digest_match ? "match" : "mismatch"), file->mp3_size,
+             file->mp3_written, (mp3_size_match ? "match" : "mismatch"),
+             file->mp3_start, file->mp3_blocks, p3, file->pcm_actual_size,
+             file->pcm_estimated_size, file->pcm_start, file->pcm_actual_blocks,
+             file->pcm_estimated_blocks);
+
+    if (!mp3_digest_match) {
+        goto fail;
+    }
+
+    if (!mp3_size_match) {
+        goto fail;
+    }
+
+    if ((file->pcm_actual_size % 8192) != 0) {
+
+        goto fail;
+    }
+
+    int ret = mmcfs_create_file_ll(
+        &file->digest, &file->calculated_pcm_digest, file->mp3_start,
+        file->mp3_start + file->mp3_blocks, file->mp3_size, MMCFS_FILE_MP3,
+        MMCFS_MP3_SUBTYPE_NONE);
+
+    if (ret < 0) {
+        goto fail;
+    }
+
+    ret = mmcfs_create_file_ll(
+        &file->calculated_pcm_digest, &file->digest, file->pcm_start,
+        file->pcm_start + file->pcm_actual_blocks, file->pcm_actual_size,
+        MMCFS_FILE_PCM, MMCFS_PCM_48K_16B_STEREO_OOB_NONE);
+
+    return 0;
+
+fail:
+    return -1;
+}

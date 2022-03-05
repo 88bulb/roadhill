@@ -418,11 +418,24 @@ typedef enum __attribute__((packed)) {
     MMCFS_FILE_UNUSED = 0,
     MMCFS_FILE_MP3 = 1,
     MMCFS_FILE_PCM = 2,
-    MMCFS_FILE_16BIT = 0xffff
+    MMCFS_FILE_MAX = 0xff
 } mmcfs_file_type_t;
 
-_Static_assert(sizeof(mmcfs_file_type_t) == 2,
+_Static_assert(sizeof(mmcfs_file_type_t) == 1,
                "mmcfs_file_type_t incorrect size");
+
+/*
+ * mp3 and pcm subtype are defined in the same space
+ */
+typedef enum __attribute__((packed)) {
+    MMCFS_MP3_SUBTYPE_NONE = 0, 
+    MMCFS_PCM_48K_16B_STEREO_OOB_NONE = 0,
+    MMCFS_FILE_SUBTYPE_MAX = 0xff
+} mmcfs_file_subtype_t;
+
+_Static_assert(sizeof(mmcfs_file_subtype_t) == 1,
+               "mmcfs_file_subtype_t incorrect size");
+
 
 /**
  * There may be three TYPEs of file.
@@ -467,7 +480,8 @@ typedef struct __attribute__((packed)) {
     uint32_t size;
 
     //
-    mmcfs_file_type_t type; // 0 for unused, 1 for mp3, 2 for pcm
+    mmcfs_file_type_t type;     // 0 for unused, 1 for mp3, 2 for pcm
+    mmcfs_file_subtype_t subtype;  // 
 
     // for mp3, both are zero
     // for pcm, pcm is modelled as a packet stream, not a

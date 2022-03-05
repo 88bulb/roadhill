@@ -424,7 +424,7 @@ void cloud_cmd_stop() { emitter_emit(CLOUD_CMD_STOP, NULL, 0); }
 void sprint_md5_digest(const md5_digest_t *digest,
                        char buf[MD5_HEX_STRING_SIZE], int trunc) {
     int i;
-    for (i = 0; i < 16; i++) {
+    for (i = 0; i < (trunc == 0 ? 16 : trunc); i++) {
         buf[2 * i + 0] = hex_char[digest->bytes[i] / 16];
         buf[2 * i + 1] = hex_char[digest->bytes[i] % 16];
     }
