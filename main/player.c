@@ -228,6 +228,9 @@ static int read_cb(audio_element_handle_t el, char *buf, int len,
                 sizeof(frame_request_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             assert(req);
             make_request(req);
+
+            ESP_LOGI(TAG, "req addr: %p", (void*)req);
+
             xQueueSend(jug_in, &req, portMAX_DELAY);
             ESP_LOGI(TAG, "initial jug_in request %d", i); 
         }
@@ -235,12 +238,25 @@ static int read_cb(audio_element_handle_t el, char *buf, int len,
 
     if (!reading) {
         xQueueReceive(jug_out, &reading, portMAX_DELAY); 
+        
+        ESP_LOGI(TAG, "reading addr: %p", (void*)reading); 
+
         reading_pos = 0;
     }
 
-    memcpy(buf, reading, len); 
-    reading_pos++;
-    return len;
+    if (reading_pos + len < 7680) {
+        memcpy(buf, &reading->buf[reading_pos], len);
+        reading_pos += len;
+        return len;
+    } else {
+        int left = 7680 - reading_pos;
+        memcpy(buf, &reading->buf[reading_pos], left);
+        make_request(reading); 
+        xQueueSend(jug_in, &reading, 0); 
+        reading = NULL;
+        reading_pos = -1;
+        return left;
+    }
 }
 
 /**

@@ -58,6 +58,8 @@ void die_another_day() {
 static void handle_frame_request() {
     frame_request_t *req = NULL;
 
+
+again:
     if (0 == uxQueueMessagesWaiting(jug_in)) {
         return;
     }
@@ -124,6 +126,16 @@ static void handle_frame_request() {
             return;
         }
     }
+
+    xQueueReceive(jug_in, &req, 0);
+    mmcfs_mix_pcm(tr0 ? &tr0->digest : NULL, tr0 ? req->track_mix[0].pos : 0,
+                  tr1 ? &tr1->digest : NULL, tr1 ? req->track_mix[1].pos : 0,
+                  req->buf);
+
+    req->res = JUG_REQ_FULFILLED;
+
+    xQueueSend(jug_out, &req, portMAX_DELAY);
+    goto again;
 }
 
 static void handle_pic_out() {

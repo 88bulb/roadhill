@@ -60,6 +60,8 @@ static uint8_t bit_array[16 * 1024] __attribute__((aligned(4))) = {0};
  */
 static uint8_t iobuf[16 * 1024] __attribute__((aligned(8))) = {0};
 
+static mmcfs_bucket_t bbuf;
+
 static uint32_t mmcfs_block_count() {
     return fs->block_count;
 };
@@ -133,10 +135,12 @@ static int mmcfs_bucket_find_file(const mmcfs_bucket_t *bucket,
 /*
  * read a bucket into iobuf
  */
-static int mmcfs_bucket_read(const md5_digest_t *digest) {
+static int mmcfs_bucket_read(const md5_digest_t *digest,
+                             mmcfs_bucket_t *bucket) {
     size_t start_sector = mmcfs_bucket_start_sector(digest);
     size_t sector_count = mmcfs_bucket_sector_count();
-    esp_err_t err = sdmmc_read_sectors(card, iobuf, start_sector, sector_count);
+    char *buf = bucket ? (char *)bucket : (char *)iobuf;
+    esp_err_t err = sdmmc_read_sectors(card, buf, start_sector, sector_count);
     if (err != ESP_OK) {
         return -EIO;
     }
@@ -182,7 +186,7 @@ static int mmcfs_bucket_update(mmcfs_bucket_t *bucket) {
  */
 static int mmcfs_bucket_remove_file(const md5_digest_t *digest,
                                     bool remove_linked_pcm) {
-    int ret = mmcfs_bucket_read(digest);
+    int ret = mmcfs_bucket_read(digest, NULL);
     if (ret < 0)
         return ret;
 
@@ -732,8 +736,7 @@ int mmcfs_stat(const md5_digest_t *digest, mmcfs_finfo_t *finfo) {
  * mp3)
  */
 int mmcfs_pour_full_bucket(const md5_digest_t *digest) {
-
-    int ret = mmcfs_bucket_read(digest);
+    int ret = mmcfs_bucket_read(digest, NULL);
     if (ret < 0) {
         return ret;
     }
@@ -770,7 +773,7 @@ int mmcfs_create_file_ll(const md5_digest_t *mp3_digest,
     }
 
     // read bucket into iobuf
-    ret = mmcfs_bucket_read(mp3_digest);
+    ret = mmcfs_bucket_read(mp3_digest, NULL);
     if (ret < 0) {
         return ret;
     }
@@ -1026,4 +1029,64 @@ int mmcfs_commit_file(mmcfs_file_handle_t file) {
     free(file);
     _file = NULL;
     return 0;
+}
+
+/*
+ * read pcm data into first half or second harf of iobuf (which is 16K)
+ */
+void mmcfs_pcm_read(const md5_digest_t * digest, int pos, int half) {
+
+    int ret = mmcfs_bucket_read(digest, &bbuf);
+    if (ret < 0) {
+        goto zero;
+    }
+
+    int index = mmcfs_bucket_find_file(&bbuf, digest);
+    if (index == -1) {
+        goto zero;
+    }
+    
+    md5_digest_t pcm_digest = bbuf.files[index].link;
+    ret = mmcfs_bucket_read(&pcm_digest, &bbuf);
+    index = mmcfs_bucket_find_file(&bbuf, &pcm_digest);
+    if (index == -1) {
+        goto zero;
+    }
+
+    mmcfs_file_t *file = &bbuf.files[index];
+    uint32_t frames = file->size / 8192;
+    if (pos < frames) {
+        uint32_t sector_start = file->block_start + pos * 8192 / 512;
+        uint32_t sector_count = 8192 / 512;
+        esp_err_t err = sdmmc_read_sectors(
+            card, half == 0 ? iobuf : &iobuf[8192], sector_start, sector_count);
+        if (err == ESP_OK) {
+            return;
+        }
+    }
+
+zero:
+    memset(half == 0 ? iobuf : &iobuf[8192], 0, 8192);
+}
+
+void mmcfs_mix_pcm(const md5_digest_t *digest1, int pos1,
+                   const md5_digest_t *digest2, int pos2, char buf[8192]) {
+    if (digest1 == NULL && digest2 == NULL) {
+        memset(buf, 0, 8192);
+        return;
+    }
+
+    if (digest1 != NULL && digest2 != NULL) {
+        return;     
+    }
+
+    if (digest1 != NULL) {
+        mmcfs_pcm_read(digest1, pos1, 0);
+        memcpy(buf, iobuf, 8192);
+        return;
+    } 
+
+    if (digest2 != NULL) {
+        
+    }
 }
