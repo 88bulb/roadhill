@@ -19,30 +19,18 @@
 #include "esp_log.h"
 #include "roadhill.h"
 
-#define READ_BUF_SIZE   (16 * 1024)
-#define WRITE_BUF_SIZE  (16 * 1024)
-
 static const char *TAG = "pacman";
 
-/*
- *
- */
-typedef enum {
-    PCM_STARTED,
-    PCM_STOPPED
-} pacman_state_t;
-
-static pacman_state_t state = PCM_STOPPED;
-
-static char* read_buf = NULL;
+static char *read_buf = NULL;
 static int read_buf_len = 0;
 static int read_buf_pos = -1;
-static int total_read = 0;
+// static int total_read = 0;
 
 /*
  * read data from in queue
  */
-static int mp3_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx) {
+static int mp3_read_cb(audio_element_handle_t el, char *buf, int len,
+                       TickType_t wait_time, void *ctx) {
 
     QueueHandle_t in = ((pacman_context_t *)ctx)->in;
     QueueHandle_t out = ((pacman_context_t *)ctx)->out;
@@ -61,7 +49,7 @@ static int mp3_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t
 
         outmsg.type = PCM_IN_DRAIN;
         outmsg.data = NULL;
-        outmsg.len = 0; 
+        outmsg.len = 0;
         xQueueSendToFront(out, &outmsg, 0);
 
         read_buf = msg.data;
@@ -72,36 +60,42 @@ static int mp3_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t
     int left = read_buf_len - read_buf_pos;
     if (len < left) {
         memcpy(buf, &read_buf[read_buf_pos], len);
-        read_buf_pos++;
+        read_buf_pos += len;
+
+        // ESP_LOGI(TAG, "mp3 read cb 0: %d", len);
+
         return len;
     } else {
         memcpy(buf, &read_buf[read_buf_pos], left);
         free(read_buf);
         read_buf = NULL;
         read_buf_pos = -1;
+
+        // ESP_LOGI(TAG, "mp3 read cb 1: %d", left);
+
         return left;
     }
 }
 
-#define WRITE_BUF_SIZE (16 * 1024)
-
 static char *write_buf = NULL;
 static int write_buf_pos = -1;
-static int total_written = 0;
-static int64_t total_written_time = 0;
+// static int total_written = 0;
+// static int64_t total_written_time = 0;
 
 /*
  * write given data to mem block and send to out queue when full.
  */
-static int rsp_write_cb(audio_element_handle_t el, char *buf, int len, TickType_t wait_time, void *ctx) {
-    pacman_outmsg_t outmsg = {0};
+static int rsp_write_cb(audio_element_handle_t el, char *buf, int len,
+                        TickType_t wait_time, void *ctx) {
 
     if (write_buf == NULL) {
-        write_buf = (char *)malloc(WRITE_BUF_SIZE);
+        write_buf = (char *)malloc(FRAME_BUF_SIZE);
+        memset(write_buf, 0, FRAME_BUF_SIZE);
+        assert(len < FRAME_DAT_SIZE);
         memcpy(write_buf, buf, len);
         write_buf_pos = len;
     } else {
-        int remain = WRITE_BUF_SIZE - write_buf_pos;
+        int remain = FRAME_DAT_SIZE - write_buf_pos;
         if (len < remain) {
             memcpy(&write_buf[write_buf_pos], buf, len);
             write_buf_pos += len;
@@ -109,20 +103,23 @@ static int rsp_write_cb(audio_element_handle_t el, char *buf, int len, TickType_
             memcpy(&write_buf[write_buf_pos], buf, remain);
             /*
              * write_buf_pos += remain
-             * so, write_buf_pos = WRITE_BUF_SIZE - write_buf_pos +
-             * write_buf_pos so, write_buf_pos = WRITE_BUF_SIZE so, write_buf is
-             * full
+             * so, write_buf_pos = FRAME_DAT_SIZE - write_buf_pos +
+             * write_buf_pos 
+             * so, write_buf_pos = W_BUF_SIZE so, write_buf is full
              */
             QueueHandle_t out = ((pacman_context_t *)ctx)->out;
-            outmsg.type = PCM_OUT_DATA;
-            outmsg.data = write_buf;
-            outmsg.len = WRITE_BUF_SIZE;
+            pacman_outmsg_t outmsg = {
+                .type = PCM_OUT_DATA,
+                .data = write_buf,
+                .len = FRAME_BUF_SIZE,
+            };
             xQueueSend(out, &outmsg, portMAX_DELAY);
+
             write_buf = NULL;
             write_buf_pos = -1;
-
             if (len > remain) {
-                write_buf = (char *)malloc(WRITE_BUF_SIZE);
+                write_buf = (char *)malloc(FRAME_BUF_SIZE);
+                memset(write_buf, 0, FRAME_BUF_SIZE);
                 memcpy(write_buf, &buf[remain], len - remain);
                 write_buf_pos = len - remain;
             }
@@ -155,6 +152,7 @@ void pacman(void *ctx) {
     mp3_cfg.task_core = 1;
     mp3_cfg.task_prio = 18;
     mp3_cfg.stack_in_ext = false;
+
     audio_element_handle_t mp3_decoder = mp3_decoder_init(&mp3_cfg);
     audio_element_set_read_cb(mp3_decoder, mp3_read_cb, ctx);
 
@@ -195,7 +193,7 @@ void pacman(void *ctx) {
     rsp_cfg.dest_ch = 2;
     audio_element_handle_t rsp_filter = rsp_filter_init(&rsp_cfg);
     audio_element_set_write_cb(rsp_filter, rsp_write_cb, ctx);
-    
+
     audio_pipeline_register(pipeline, mp3_decoder, "pacman_mp3");
     audio_pipeline_register(pipeline, rsp_filter, "pacman_rsp");
 
@@ -216,11 +214,11 @@ void pacman(void *ctx) {
             continue;
         }
 
-/**
-        if (msg.source_type == AUDIO_ELEMENT_TYPE_UNKNOW) {
-            audio_pipeline_run(p 
-        }
-*/
+        /**
+                if (msg.source_type == AUDIO_ELEMENT_TYPE_UNKNOW) {
+                    audio_pipeline_run(p
+                }
+        */
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT &&
             msg.source == (void *)mp3_decoder &&
             msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
@@ -248,7 +246,8 @@ void pacman(void *ctx) {
                 if (write_buf != NULL) {
                     outmsg.type = PCM_OUT_DATA;
                     outmsg.data = write_buf;
-                    outmsg.len = write_buf_pos;
+                    // outmsg.len = write_buf_pos;
+                    outmsg.len = FRAME_BUF_SIZE;
                     xQueueSend(out, &outmsg, portMAX_DELAY);
 
                     write_buf = NULL;
@@ -258,7 +257,6 @@ void pacman(void *ctx) {
                 outmsg.type = PCM_OUT_FINISH;
                 outmsg.data = NULL;
                 outmsg.len = 0;
-
                 xQueueSend(out, &outmsg, portMAX_DELAY);
 
                 /*
@@ -284,4 +282,3 @@ void pacman(void *ctx) {
     // audio_event_iface_remove_listener(???)
     audio_event_iface_destroy(evt);
 }
-

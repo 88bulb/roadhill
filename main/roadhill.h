@@ -16,7 +16,11 @@
 // used by mem_block_t
 #define MEM_BLOCK_SIZE (32768)
 
-#define PIC_BLOCK_SIZE (16 * 1024)
+#define FRAME_BUF_SIZE (8 * 1024)
+#define FRAME_DAT_SIZE (15 * 512)
+#define PIC_BLOCK_SIZE (8 * 1024)
+
+#define MMCFS_FILE_PER_BUCKET   (16)
 
 #define container_of(ptr, type, member)                                        \
     ({                                                                         \
@@ -214,10 +218,13 @@ struct picman_context {
     QueueHandle_t out;
 };
 
+/*
+ * fetch a file
+ */
 typedef struct {
-    char *url;
-    md5_digest_t *digest;
-    int track_size;
+    const char *url;
+    const md5_digest_t *digest;
+    int size;
 } picman_inmsg_t;
 
 typedef struct {
@@ -333,6 +340,7 @@ Layout:
 |        |xxxxxxxx|             ||
          4M       8M            64M
 
+@1024       superblock, 512 bytes. Once created, never re-written.
 @512KB      header, 1024 bytes, with last 16 bytes as md5
 @1MB-2KB    writelog, 2048 bytes, dual bucket
 @4MB        4 megabytes, include 4096 buckets, each bucket has
@@ -406,6 +414,16 @@ _Static_assert(sizeof(mmcfs_superblock_t) == 512,
  * 8T   -> 64MiB    * 64K = 4TB
  */
 
+typedef enum __attribute__((packed)) {
+    MMCFS_FILE_UNUSED = 0,
+    MMCFS_FILE_MP3 = 1,
+    MMCFS_FILE_PCM = 2,
+    MMCFS_FILE_16BIT = 0xffff
+} mmcfs_file_type_t;
+
+_Static_assert(sizeof(mmcfs_file_type_t) == 2,
+               "mmcfs_file_type_t incorrect size");
+
 /**
  * There may be three TYPEs of file.
  * 1. original mp3 file.
@@ -449,7 +467,7 @@ typedef struct __attribute__((packed)) {
     uint32_t size;
 
     //
-    uint16_t type; // 0 for unused, 1 for mp3, 2 for pcm
+    mmcfs_file_type_t type; // 0 for unused, 1 for mp3, 2 for pcm
 
     // for mp3, both are zero
     // for pcm, pcm is modelled as a packet stream, not a
@@ -472,16 +490,16 @@ typedef mmcfs_file_context_t* mmcfs_file_handle_t;
 mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint64_t size);
 int mmcfs_write_mp3(mmcfs_file_handle_t file, char* buf, size_t len);
 int mmcfs_write_pcm(mmcfs_file_handle_t file, char* buf, size_t len);
-int mmcfs_write_end(mmcfs_file_handle_t file);
+int mmcfs_commit_file(mmcfs_file_handle_t file);
 
 extern play_context_t play_context;
 void cloud_cmd_play();
 void cloud_cmd_stop();
 
 void print_frame_request();
-void sprint_md5_digest(md5_digest_t* digest, char* buf);
+void sprint_md5_digest(const md5_digest_t* digest, char* buf, int trunc);
 
-char* make_url(char* path, md5_digest_t* digest);
+char* make_url(const char* path, const md5_digest_t* digest);
 
 #endif // _ROAD_HILL_HOUSE_
 

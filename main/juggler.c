@@ -19,29 +19,20 @@
 
 #define FETCH_INPUT_QUEUE_SIZE (4)
 
-static const char* TAG = "juggler";
+static const char *TAG = "juggler";
 
-#define ALLOC_MAP_SIZE (BLOCK_NUM_BOUND * BLOCK_NUM_FRACT)
-
-extern void pacman(void* arg);
-extern void picman(void* arg);
-
-// uint8_t alloc_map[ALLOC_MAP_SIZE / sizeof(uint8_t)] = {};
-uint8_t *alloc_map = NULL;
-
-int block_size = 0;
-
-// this is a thread-safe resource queue
-QueueHandle_t play_context_queue;
-// this is a messaging queue
-QueueHandle_t juggler_queue;
-
+extern void pacman(void *arg);
+extern void picman(void *arg);
 extern esp_err_t init_mmcfs();
 
-int size_in_blocks(uint32_t size) {
-    return size / block_size + (size % block_size) ? 1 : 0;
-}
+/* upstream and downstream ports */
+QueueHandle_t jug_in = NULL, jug_out = NULL, pcm_in = NULL, pcm_out = NULL,
+              pic_in = NULL, pic_out = NULL;
 
+/* current job */
+mmcfs_file_handle_t file = NULL;
+
+/* deprecated */
 void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
     char str[40] = {0};
 
@@ -58,12 +49,132 @@ void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
     strlcat(tracks_url, str, size);
 }
 
-
-
 void die_another_day() {
     // 24 hours
     vTaskDelay(24 * 60 * 60 * 1000 / portTICK_PERIOD_MS);
     esp_restart();
+}
+
+static void handle_frame_request() {
+    frame_request_t *req = NULL;
+
+    if (0 == uxQueueMessagesWaiting(jug_in)) {
+        return;
+    }
+
+    xQueuePeek(jug_in, &req, 0);
+    if (req == NULL) {
+        return; // TODO end of stream
+    }
+
+    print_frame_request(req);
+
+    if (file) {
+        return;
+    }
+
+    // do we need to create a file for this request? or it could be served
+    // instantly?
+    track_t *tr0 = req->track_mix[0].track;
+    track_t *tr1 = req->track_mix[1].track;
+
+    // TODO fill blank
+    if (tr0 == NULL && tr1 == NULL) {
+        return;
+    }
+
+    if (tr0) {
+        mmcfs_finfo_t info;
+        int res = mmcfs_stat(&tr0->digest, &info);
+        assert(res != EINVAL);
+
+        if (res == -ENOENT) {
+            file = mmcfs_create_file(&tr0->digest, tr0->size);
+            // TODO in case of file is NULL
+
+            // start picman and pacman
+            picman_inmsg_t cmd = {
+                .url = req->url,
+                .digest = &tr0->digest,
+                .size = tr0->size,
+            };
+            xQueueSend(pic_in, &cmd, portMAX_DELAY);
+            return;
+        }
+
+        // TODO don't assume pcm exists
+    }
+
+    if (tr1) {
+        mmcfs_finfo_t info;
+        int res = mmcfs_stat(&tr1->digest, &info);
+        assert(res != EINVAL);
+
+        if (res == -ENOENT) {
+            file = mmcfs_create_file(&tr0->digest, tr0->size);
+            // TODO in case of file is NULL
+
+            // start picman and pacman
+            picman_inmsg_t cmd = {
+                .url = req->url,
+                .digest = &tr0->digest,
+                .size = tr0->size,
+            };
+            xQueueSend(pic_in, &cmd, portMAX_DELAY);
+            return;
+        }
+    }
+}
+
+static void handle_pic_out() {
+    if (0 == uxQueueSpacesAvailable(pcm_in) ||
+        0 == uxQueueMessagesWaiting(pic_out)) {
+        return;
+    }
+
+    picman_outmsg_t outmsg;
+    xQueueReceive(pic_out, &outmsg, 0);
+
+    if (outmsg.data == NULL) {
+
+        ESP_LOGI(TAG, "pic_out data NULL");
+
+        pacman_inmsg_t msg = {
+            .data = NULL,
+            .len = 0,
+        };
+        xQueueSend(pcm_in, &msg, 0); // assert and error TODO
+    } else {
+        mmcfs_write_mp3(file, outmsg.data, outmsg.size_or_error);
+        pacman_inmsg_t inmsg = {
+            .data = outmsg.data,
+            .len = outmsg.size_or_error,
+        };
+        xQueueSend(pcm_in, &inmsg, 0); // assert and error TODO
+    }
+}
+
+static void handle_pcm_out() {
+    pacman_outmsg_t outmsg;
+    xQueueReceive(pcm_out, &outmsg, 0);
+    switch (outmsg.type) {
+    case PCM_IN_DRAIN: {
+        handle_pic_out();
+    } break;
+    case PCM_OUT_DATA: {
+        mmcfs_write_pcm(file, outmsg.data, outmsg.len);
+        free(outmsg.data);
+    } break;
+    case PCM_OUT_ERROR:
+        break;
+    case PCM_OUT_FINISH: {
+        mmcfs_commit_file(file);
+        file = NULL;
+        handle_frame_request();
+    } break;
+    default:
+        break;
+    }
 }
 
 /**
@@ -71,17 +182,7 @@ void die_another_day() {
  */
 void juggler(void *arg) {
     esp_err_t err;
-    message_t msg;
-
-    md5_digest_t md5;
-    md5_digest_t *fetching = NULL;
-    md5_digest_t *decoding = NULL;
-
-    frame_request_t *req = NULL;
-    frame_request_t *req_array[4] = {0};
-    int req_count = 0;
-
-    ESP_LOGI(TAG, "juggler task starts"); 
+    ESP_LOGI(TAG, "juggler task starts");
 
     err = init_mmcfs();
     if (err) {
@@ -89,18 +190,15 @@ void juggler(void *arg) {
         die_another_day();
     }
 
-    juggler_ports_t *ports = (juggler_ports_t *)arg;
+    jug_in = ((juggler_ports_t *)arg)->in;
+    jug_out = ((juggler_ports_t *)arg)->out;
+    pcm_in = xQueueCreate(4, sizeof(pacman_inmsg_t));
+    pcm_out = xQueueCreate(4, sizeof(pacman_outmsg_t));
+    pic_in = xQueueCreate(4, sizeof(picman_inmsg_t));
+    pic_out = xQueueCreate(4, sizeof(picman_outmsg_t));
 
-    QueueSetMemberHandle_t q;
-    
-    QueueHandle_t jug_in = ports->in;
-    QueueHandle_t jug_out = ports->out;
-    QueueHandle_t pcm_in = xQueueCreate(8, sizeof(pacman_inmsg_t));
-    QueueHandle_t pcm_out = xQueueCreate(8, sizeof(pacman_outmsg_t)); 
-    QueueHandle_t pic_in = xQueueCreate(2, sizeof(picman_inmsg_t));
-    QueueHandle_t pic_out = xQueueCreate(8, sizeof(picman_outmsg_t));
-
-    QueueSetHandle_t qset = xQueueCreateSet(8);
+    // !!! qset's length must be at least the sum of all queue's length
+    QueueSetHandle_t qset = xQueueCreateSet(12);
     xQueueAddToSet(jug_in, qset);
     xQueueAddToSet(pcm_out, qset);
     xQueueAddToSet(pic_out, qset);
@@ -109,7 +207,7 @@ void juggler(void *arg) {
         .in = pcm_in,
         .out = pcm_out,
     };
-    xTaskCreate(pacman, "pacman", 4096, &pacman_ctx, 11, NULL); 
+    xTaskCreate(pacman, "pacman", 4096, &pacman_ctx, 11, NULL);
 
     picman_context_t picman_ct = {
         .in = pic_in,
@@ -117,201 +215,14 @@ void juggler(void *arg) {
     };
     xTaskCreate(picman, "picman", 4096, &picman_ct, 12, NULL);
 
-forever_loop:
-    q = xQueueSelectFromSet(qset, portMAX_DELAY);
-    if (q == jug_in) {
-        ESP_LOGI(TAG, "jug_in input message");
-        xQueueReceive(q, &req, 0); // TODO error handling?
-
-        print_frame_request(req);
-
-        track_t *trac = req->track_mix[0].track;
-        if (trac) {
-            mmcfs_finfo_t info;
-            int res = mmcfs_stat(&trac->digest, &info);
-
-            assert(res != EINVAL);
-
-            if (res == -ENOENT) {
-                ESP_LOGI(TAG, "mmcfs_stat ENOENT");
-
-                req_array[req_count] = req;
-                req_count++;
-                if (req_count == 1) {
-                    picman_inmsg_t cmd = {0};
-                    cmd.url = req->url;
-                    cmd.digest = &req->track_mix[0].track->digest;
-                    cmd.track_size = req->track_mix[0].track->size;
-                    xQueueSend(pic_in, &cmd, portMAX_DELAY);
-                }
-            } else {
-            }
-        }
-    } else if (q == pic_out) {
-        if (pdTRUE == uxQueueSpacesAvailable(pcm_in)) {
-            picman_outmsg_t outmsg;
-            xQueueReceive(pic_out, &outmsg, 0);
-             
-        }
-    } else if (q == pcm_out) {
-    }
-    goto forever_loop;
-
-    vTaskDelay(portMAX_DELAY);
-
-    while (xQueueReceive(juggler_queue, &msg, portMAX_DELAY)) {
-        switch (msg.type) {
-        case MSG_CMD_PLAY: {
-/*
-            ESP_LOGI(TAG, "play command received");
-
-            playing_index = msg.value.play_data.index;
-
-            if (playing_tracks_url)
-                free(playing_tracks_url);
-            playing_tracks_url = msg.value.play_data.tracks_url;
-
-            if (msg.value.play_data.tracks_array_size) {
-                playing_track = msg.value.play_data.tracks[0];
-            } else {
-                playing_track.size = 0;
-            }
-
-            // TODO
-            free(msg.value.play_data.tracks);
-
-            // from old code
-            fetch_context_t *ctx =
-                free_fetch_contexts[free_fetch_ctx_count - 1];
-
-            ctx->play_index = playing_index;
-
-            // TODO reduce mem
-            strlcpy(ctx->url, playing_tracks_url, URL_BUFFER_SIZE);
-            ctx->digest = playing_track.digest;
-            track_url_strlcat(ctx->url, ctx->digest, URL_BUFFER_SIZE);
-            ctx->track_size = playing_track.size;
-            ctx->play_started = false;
-*/
-/**
-            if (pdPASS != xTaskCreate(fetcher, "fetcher", 8192, ctx, 6, NULL)) {
-                // TODO report error
-                ESP_LOGI(TAG, "failed to start fetcher");
-            } else {
-                ESP_LOGI(TAG, "new fetcher");
-            }
-*/
-/*
-            message_t msg = {.type = MSG_FETCH_MORE};
-            msg.value.mem_block.data =
-                free_mem_blocks[free_mem_block_count - 1];
-            free_mem_block_count--;
-            xQueueSend(ctx->input, &msg, portMAX_DELAY);
-
-            msg.value.mem_block.data =
-                free_mem_blocks[free_mem_block_count - 1];
-            free_mem_block_count--;
-
-            xQueueSend(ctx->input, &msg, portMAX_DELAY);
-
-            // where to retrieve mem_block? and how much?
-
-            // file_size = ctx->track_size;
-            file_read = 0;
-            file_written = 0;
-*/
-        } break;
-
-        case MSG_FETCH_MORE_DATA: {
-/*
-            // write data to persitent store
-            // and fetch more
-            char *data = msg.value.mem_block.data;
-            int length = msg.value.mem_block.length;
-            fetch_context_t *ctx = msg.from;
-
-            // fwrite(data, sizeof(char), length, fp);
-            // fflush(fp);
-            file_written += msg.value.mem_block.length;
-
-            if (ctx->play_started == false) {
-                ctx->play_started = true;
-                msg.type = MSG_AUDIO_DATA;
-                msg.from = NULL;
-
-                xQueueSend(audio_queue, &msg, portMAX_DELAY);
-                file_read += length;
-            } else {
-                msg.type = MSG_FETCH_MORE;
-                xQueueSend(ctx->input, &msg, portMAX_DELAY);
-            }
-
-            // ESP_LOGI(TAG, "MSG_FETCH_MORE_DATA");
-*/
-        } break;
-
-        case MSG_FETCH_FINISH: {
-/*
-            char *data = msg.value.mem_block.data;
-            int length = msg.value.mem_block.length;
-            fetch_context_t *ctx = msg.from;
-
-            if (length > 0) {
-                // TODO error
-                // fwrite(data, sizeof(char), length, fp);
-                // fflush(fp);
-                file_written += length;
-
-                if (ctx->play_started == false) {
-                    ctx->play_started = true;
-                    msg.type = MSG_AUDIO_DATA;
-                    msg.from = NULL;
-                    xQueueSend(audio_queue, &msg, portMAX_DELAY);
-                    file_read += length;
-                } else {
-                    free_mem_blocks[free_mem_block_count++] = data;
-                }
-            } else {
-                free_mem_blocks[free_mem_block_count++] = data;
-            }
-*/
-        } break;
-
-        case MSG_AUDIO_DONE: {
-/**
-            if (file_read < file_written) {
-                // read more data and send to audio_queue
-
-                // assert(file_written == ftell(fp));
-                // fseek(fp, file_read, SEEK_SET);
-                int to_read = file_written - file_read;
-                if (to_read > MEM_BLOCK_SIZE)
-                    to_read = MEM_BLOCK_SIZE;
-
-                char *data = msg.value.mem_block.data;
-                // int length = fread(data, sizeof(char), to_read, fp);
-                int length = 0;
-                file_read += length;
-
-                // fseek(fp, file_written, SEEK_SET);
-
-                msg.type = MSG_AUDIO_DATA;
-                msg.from = NULL;
-                msg.value.mem_block.length = length;
-
-                xQueueSend(audio_queue, &msg, portMAX_DELAY);
-            } else {
-                // starving !!! TODO
-                // it seems that we need a way to record fetch context related
-                // to current play.
-                // playing_fetch_context->
-            }
-*/
-        } break;
-
-        default:
-            ESP_LOGI(TAG, "message received");
-            break;
+    while (1) {
+        QueueSetMemberHandle_t q = xQueueSelectFromSet(qset, portMAX_DELAY);
+        if (q == jug_in) {
+            handle_frame_request();
+        } else if (q == pic_out) {
+            handle_pic_out();
+        } else if (q == pcm_out) {
+            handle_pcm_out();
         }
     }
 }

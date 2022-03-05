@@ -10,13 +10,13 @@
 
 static const char *TAG = "picman";
 
-char* make_url(char* path, md5_digest_t* digest) {
-    char* filename = (char*)malloc(MD5_HEX_BUF_SIZE + 4);
-    sprint_md5_digest(digest, filename);
-    strcat(filename, ".mp3"); 
-    
+char *make_url(const char *path, const md5_digest_t *digest) {
+    char *filename = (char *)malloc(MD5_HEX_BUF_SIZE + 4);
+    sprint_md5_digest(digest, filename, 0);
+    strcat(filename, ".mp3");
+
     int len = strlen(path) + strlen(filename);
-    char* url = (char*)malloc(len + 2); // don't forget the slash
+    char *url = (char *)malloc(len + 2); // don't forget the slash
     strcpy(url, path);
     strcat(url, "/");
     strcat(url, filename);
@@ -33,7 +33,7 @@ void picman(void *arg) {
     picman_context_t *ctx = arg;
     picman_inmsg_t cmd = {0};
     picman_outmsg_t rep;
-    char* url = NULL; 
+    char *url = NULL;
     char *data = NULL;
     int content_length, total_read_len, read_len;
 
@@ -56,7 +56,7 @@ forever: // instead of while (true) loop
 
     url = make_url(cmd.url, cmd.digest);
     ESP_LOGI(TAG, "file url: %s", url);
-    esp_http_client_config_t config = { .url = url };
+    esp_http_client_config_t config = {.url = url};
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
     err = esp_http_client_open(client, 0);
@@ -71,12 +71,12 @@ forever: // instead of while (true) loop
     content_length = esp_http_client_fetch_headers(client);
     if (content_length == -1) {
         ESP_LOGI(TAG, "server responds no content-length.");
-        content_length = cmd.track_size;
+        content_length = cmd.size;
     }
 
-    if (content_length != cmd.track_size) {
+    if (content_length != cmd.size) {
         ESP_LOGI(TAG, "content-length mismatch, expected: %d, actual: %d",
-                 cmd.track_size, content_length);
+                 cmd.size, content_length);
         goto end;
     }
 

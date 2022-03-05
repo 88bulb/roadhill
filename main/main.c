@@ -37,7 +37,7 @@ extern void player(void *arg);
 
 extern esp_err_t periph_cloud_send_event(int cmd, void *data, int data_len);
 
-static uint32_t play_index = 0;
+// static uint32_t play_index = 0;
 
 static const char *TAG = "roadhill";
 const char hex_char[16] = "0123456789abcdef";

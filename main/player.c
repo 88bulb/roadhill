@@ -421,7 +421,8 @@ void player(void *arg) {
 void cloud_cmd_play() { emitter_emit(CLOUD_CMD_PLAY, NULL, 0); }
 void cloud_cmd_stop() { emitter_emit(CLOUD_CMD_STOP, NULL, 0); }
 
-void sprint_md5_digest(md5_digest_t* digest, char buf[MD5_HEX_STRING_SIZE]) {
+void sprint_md5_digest(const md5_digest_t *digest,
+                       char buf[MD5_HEX_STRING_SIZE], int trunc) {
     int i;
     for (i = 0; i < 16; i++) {
         buf[2 * i + 0] = hex_char[digest->bytes[i] / 16];
@@ -430,28 +431,45 @@ void sprint_md5_digest(md5_digest_t* digest, char buf[MD5_HEX_STRING_SIZE]) {
     buf[2 * i] = '\0';
 }
 
-void print_frame_request(frame_request_t * req) {
-    const char* tag = pcTaskGetName(NULL);
+void print_frame_request(frame_request_t *req) {
+    const char *tag = pcTaskGetName(NULL);
     char hex_buf[MD5_HEX_STRING_SIZE] = {0};
+    track_t *trac = NULL;
+    char *b0 = NULL, *b1 = NULL;
 
-    ESP_LOGI(tag, "frame: %d", req->index);
+    b0 = (char *)malloc(256);
+    if (b0 == NULL) {
+        goto end;
+    }
+
+    b1 = (char *)malloc(256);
+    if (b1 == NULL) {
+        goto end;
+    }
+
     if (req->track_mix[0].track == NULL) {
-        ESP_LOGI(tag, "channel 0 no track");
+        sprintf(b0, "chan 0: none");
     } else {
-        track_t* trac = req->track_mix[0].track;
-        sprint_md5_digest(&trac->digest, hex_buf);
-        ESP_LOGI(tag,
-                 "channel 0 track: %s, size: %d, (requested) frame pos: %d",
-                 hex_buf, trac->size, req->track_mix[0].pos);
+        trac = req->track_mix[0].track;
+        sprint_md5_digest(&trac->digest, hex_buf, 8);
+        sprintf(b0, "chan 0: %s, size: %d, frmpos: %d", hex_buf, trac->size,
+                req->track_mix[0].pos);
     }
 
     if (req->track_mix[1].track == NULL) {
-        ESP_LOGI(tag, "channel 1 no track");
+        sprintf(b1, "chan 1: none");
     } else {
-        track_t* trac = req->track_mix[1].track;
-        sprint_md5_digest(&trac->digest, hex_buf);
-        ESP_LOGI(tag,
-                 "channel 0 track: %s, size: %d, (requested) frame pos: %d",
-                 hex_buf, trac->size, req->track_mix[1].pos);
+        trac = req->track_mix[1].track;
+        sprint_md5_digest(&trac->digest, hex_buf, 8);
+        sprintf(b1, "chan 1: %s, size: %d, frmpos: %d", hex_buf, trac->size,
+                req->track_mix[1].pos);
     }
+
+end:
+    ESP_LOGI(tag, "frame: %d - %s; %s.", req->index, b0 ? b0 : "(no mem)",
+             b1 ? b1 : "(no mem)");
+    if (b0)
+        free(b0);
+    if (b1)
+        free(b1);
 }
