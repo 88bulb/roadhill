@@ -48,7 +48,6 @@ static mmcfs_t *fs = NULL;
 static uint64_t last_access = 0;
 
 static uint8_t bit_array[16 * 1024] __attribute__((aligned(4))) = {0};
-static uint8_t bit_count = 0;
 
 /* The ONLY read/write buf for mmc io, which means data must be
  * copied into this buffer before doing any write operation.
@@ -60,6 +59,10 @@ static uint8_t bit_count = 0;
  * memory duplication.
  */
 static uint8_t iobuf[16 * 1024] __attribute__((aligned(8))) = {0};
+
+static uint32_t mmcfs_block_count() {
+    return fs->block_count;
+};
 
 /*
  *
@@ -164,7 +167,7 @@ static int mmcfs_bucket_update(mmcfs_bucket_t *bucket) {
     }
 
     err = sdmmc_write_sectors(card, iobuf,
-                              mmcfs_bucket_start_sector(&bucket->files[0].self),
+                              mmcfs_bucket_start_sector(&log->files[0].self),
                               mmcfs_bucket_sector_count());
     if (err != ESP_OK) {
         return -EIO;
@@ -219,18 +222,21 @@ static int mmcfs_bucket_remove_file(const md5_digest_t *digest,
  */
 bool test_bit(int i) { return !!(bit_array[i / 8] & ((uint8_t)1 << (i % 8))); }
 
-void set_bit(int i) { bit_array[i / 8] |= (1 << (i % 8)); }
+void set_bit(int i) { 
+    ESP_LOGI(TAG, "set bit %d", i);
+    bit_array[i / 8] |= (1 << (i % 8)); 
+}
 
 void clear_bit(int i) { bit_array[i / 8] &= ~(1 << (i % 8)); }
 
 /* Set all bits from start to end (exclusive).
  *
  * The function returns
- * - ESP_ERR_INVALID_ARG, if start > end or end > bit_count
+ * - ESP_ERR_INVALID_ARG, if start > end or end > block_count
  * - ESP_ERR_INVALID_STATE, if
  */
 esp_err_t set_bits(uint32_t start, uint32_t end, uint32_t *conflict) {
-    if (start > end || end > bit_count) {
+    if (start > end || end > mmcfs_block_count()) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -252,13 +258,16 @@ esp_err_t set_bits(uint32_t start, uint32_t end, uint32_t *conflict) {
  * TODO optimize performance
  */
 esp_err_t clear_bits(uint32_t start, uint32_t end, uint32_t *conflict) {
-    if (start > end || end > bit_count) {
+    if (start > end || end > mmcfs_block_count()) {
         return ESP_ERR_INVALID_ARG;
     }
 
     for (uint32_t i = start; i < end; i++) {
         if (!test_bit(i)) {
             *conflict = i;
+
+            ESP_LOGI(TAG, "clear_bits error, bit %u not set", i);
+
             return ESP_ERR_INVALID_STATE;
         }
     }
@@ -529,7 +538,6 @@ esp_err_t init_fs() {
     }
 
     fs = &superblock->mmcfs;
-    bit_count = fs->block_count;
 
     mmcfs_info(fs);
     return ESP_OK;
@@ -644,6 +652,8 @@ uint32_t allocate_blocks(uint32_t blocks) {
 
         if (count == blocks) {
             uint32_t start = i - blocks + 1;
+            ESP_LOGI(TAG, "allocating %u blocks, start from %u", blocks, start);
+
             for (uint32_t i = start; i < start + blocks; i++) {
                 set_bit(i);
             }
@@ -955,9 +965,9 @@ int mmcfs_commit_file(mmcfs_file_handle_t file) {
     esp_rom_md5_final(file->calculated_pcm_digest.bytes, &file->pcm_md5_ctx);
 
     char *p1 = (char *)iobuf;
-    sprint_md5_digest(&file->digest, p1, 0);
+    sprint_md5_digest(&file->digest, p1, 5);
     char *p2 = p1 + strlen(p1) + 1;
-    sprint_md5_digest(&file->calculated_mp3_digest, p2, 0);
+    sprint_md5_digest(&file->calculated_mp3_digest, p2, 5);
     char *p3 = p2 + strlen(p2) + 1;
     sprint_md5_digest(&file->calculated_pcm_digest, p3, 0);
     bool mp3_digest_match = memcmp(&file->digest, &file->calculated_mp3_digest,
@@ -1005,9 +1015,12 @@ int mmcfs_commit_file(mmcfs_file_handle_t file) {
         file->pcm_estimated_blocks - file->pcm_actual_blocks;
 
     if (pcm_unused_blocks) {
-        assert(ESP_OK == clear_bits(pcm_unused_start,
-                                    pcm_unused_start + pcm_unused_blocks,
-                                    NULL));
+        esp_err_t err = clear_bits(pcm_unused_start,
+                                   pcm_unused_start + pcm_unused_blocks, NULL);
+        if (err != ESP_OK) {
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            assert(err == ESP_OK);
+        } 
     }
 
     free(file);
