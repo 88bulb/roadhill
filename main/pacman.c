@@ -79,8 +79,6 @@ static int mp3_read_cb(audio_element_handle_t el, char *buf, int len,
 
 static char *write_buf = NULL;
 static int write_buf_pos = -1;
-// static int total_written = 0;
-// static int64_t total_written_time = 0;
 
 /*
  * write given data to mem block and send to out queue when full.

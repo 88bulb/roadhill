@@ -239,7 +239,7 @@ static int read_cb(audio_element_handle_t el, char *buf, int len,
     if (!reading) {
         xQueueReceive(jug_out, &reading, portMAX_DELAY); 
         
-        ESP_LOGI(TAG, "reading addr: %p", (void*)reading); 
+        // ESP_LOGI(TAG, "reading addr: %p", (void*)reading); 
 
         reading_pos = 0;
     }

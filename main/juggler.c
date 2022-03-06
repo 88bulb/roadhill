@@ -37,7 +37,7 @@ void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
     char str[40] = {0};
 
     for (int i = 0; i < 16; i++) {
-        str[2 * i] = hex_char[digest.bytes[i] / 16];
+        str[2 * i + 0] = hex_char[digest.bytes[i] / 16];
         str[2 * i + 1] = hex_char[digest.bytes[i] % 16];
     }
     str[32] = '.';
