@@ -128,7 +128,7 @@ again:
     }
 
     xQueueReceive(jug_in, &req, 0);
-    mmcfs_mix_pcm(tr0 ? &tr0->digest : NULL, tr0 ? req->track_mix[0].pos : 0,
+    mmcfs_pcm_mix(tr0 ? &tr0->digest : NULL, tr0 ? req->track_mix[0].pos : 0,
                   tr1 ? &tr1->digest : NULL, tr1 ? req->track_mix[1].pos : 0,
                   req->buf);
 

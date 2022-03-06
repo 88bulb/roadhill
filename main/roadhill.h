@@ -36,7 +36,7 @@
 #define CLOUD_CMD_STOP (3)
 #define TEST_TIMER_FIRE (0x7e57)
 
-#define BLOCK_NUM_BOUND (16 * 8 * 1024)
+// #define BLOCK_NUM_BOUND (16 * 8 * 1024)
 #define BLOCK_NUM_FRACT 7 / 8 // delibrately no parenthesis
 #define BUCKET_BITS (12)
 #define BUCKET_SIZE (1024)

@@ -33,19 +33,34 @@ static const char *TAG = "mmcfs";
  *    latter is bitwise NOT-ed.
  */
 
-/** echo "morning my cat" | md5sum */
+/*
+ * echo "morning my cat" | md5sum
+ */
 const char mmcfs_superblock_magic[16] = {0xf2, 0xf4, 0x82, 0x9f, 0x63, 0x69,
                                          0x5a, 0xd7, 0xc4, 0x9f, 0xcf, 0xe5,
                                          0x28, 0x4c, 0xc5, 0x8c};
 
-/**
- * this may be changed to pointer in future
+/*
+ * pointer to mmc card (driver level)
  */
 static sdmmc_card_t *card = NULL;
+
+/*
+ * pointer to superblock, but it is not necessary for holding superblock
+ * in memory
+ */
 static mmcfs_superblock_t *superblock = NULL;
+
+/*
+ * pointer to file system constants and configurations
+ */
 static mmcfs_t *fs = NULL;
 
+/*
+ *
+ */
 static uint64_t last_access = 0;
+
 
 static uint8_t bit_array[16 * 1024] __attribute__((aligned(4))) = {0};
 
@@ -60,11 +75,31 @@ static uint8_t bit_array[16 * 1024] __attribute__((aligned(4))) = {0};
  */
 static uint8_t iobuf[16 * 1024] __attribute__((aligned(8))) = {0};
 
+/*
+ * buffer for fast read/write bucket
+ */
 static mmcfs_bucket_t bbuf;
 
 static uint32_t mmcfs_block_count() {
     return fs->block_count;
 };
+
+/*
+ */
+/*
+void print_file_info(const mmcfs_file_t *file) {
+    char self[9] = {0};
+    char link[9] = {0};
+
+    sprint_md5_digest(&file->self, self, 4);
+    sprint_md5_digest(&file->link, link, 4);
+
+    if (mmcfs_file_is_mp3(file)) {
+    }
+
+    if (mmcfs_file_is_pcm(file)) {
+    }
+} */
 
 /*
  *
@@ -74,24 +109,28 @@ static bool mmcfs_file_is_null(const mmcfs_file_t *file) {
 }
 
 /*
- *
+ * returns true if given file is mp3
  */
 static bool mmcfs_file_is_mp3(const mmcfs_file_t *file) {
     return file->type == MMCFS_FILE_MP3;
 }
 
 /*
- *
+ * returns true if given file is pcm
  */
 static bool mmcfs_file_is_pcm(const mmcfs_file_t *file) {
     return file->type == MMCFS_FILE_PCM;
 }
 
+/*
+ * sets file to null
+ */
 static void mmcfs_file_nullify(mmcfs_file_t *file, const md5_digest_t *digest) {
     memset(file, 0, sizeof(mmcfs_file_t));
     file->self.bytes[0] = digest->bytes[0];
     file->self.bytes[1] = digest->bytes[1] & 0xf0;
 }
+
 
 static bool mmcfs_file_digest_match(const mmcfs_file_t *file,
                                     const md5_digest_t *digest) {
@@ -109,8 +148,13 @@ static size_t mmcfs_bucket_start_sector(const md5_digest_t *digest) {
     return fs->bucket_start + index * fs->bucket_sect;
 }
 
-static size_t mmcfs_bucket_sector_count() { return fs->bucket_sect; }
+static size_t mmcfs_bucket_sector_count() { 
+    return fs->bucket_sect; 
+}
 
+/*
+ * return max files (constant)
+ */
 static int mmcfs_bucket_max_files() {
     return fs->bucket_sect * 512 / sizeof(mmcfs_file_t);
 }
@@ -120,7 +164,7 @@ static int mmcfs_bucket_max_files() {
  */
 static int mmcfs_bucket_find_file(const mmcfs_bucket_t *bucket,
                                   const md5_digest_t *digest) {
-    for (int i = 0; i < sizeof(bucket->files) / sizeof(bucket->files[0]); i++) {
+    for (int i = 0; i < mmcfs_bucket_max_files(); i++) {
         if (mmcfs_file_is_null(&bucket->files[i])) {
             return -ENOENT;
         }
@@ -227,7 +271,7 @@ static int mmcfs_bucket_remove_file(const md5_digest_t *digest,
 bool test_bit(int i) { return !!(bit_array[i / 8] & ((uint8_t)1 << (i % 8))); }
 
 void set_bit(int i) { 
-    ESP_LOGI(TAG, "set bit %d", i);
+    // ESP_LOGI(TAG, "set bit %d", i);
     bit_array[i / 8] |= (1 << (i % 8)); 
 }
 
@@ -576,7 +620,8 @@ static esp_err_t init_falloc_bitmap() {
     int pcm_count = 0;
     int pcm_block_count = 0;
 
-    mmcfs_bucket_t *outbuf = (mmcfs_bucket_t *)malloc(sizeof(iobuf));
+    mmcfs_bucket_t *outbuf = (mmcfs_bucket_t *)heap_caps_malloc(
+        sizeof(iobuf), MALLOC_CAP_DMA | MALLOC_CAP_32BIT);
     if (outbuf == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -595,12 +640,14 @@ static esp_err_t init_falloc_bitmap() {
         // iterate bucket
         for (int j = 0; j < bucket_per_buf; j++) {
             mmcfs_bucket_t *bucket = &outbuf[j];
-            for (int k = 0; k < sizeof(mmcfs_bucket_t) / sizeof(mmcfs_file_t);
-                 k++) {
-
+            // for (int k = 0; k < sizeof(mmcfs_bucket_t) /
+            // sizeof(mmcfs_file_t); k++) {
+            for (int k = 0; k < mmcfs_bucket_max_files(); k++) {
                 mmcfs_file_t *f = &bucket->files[k];
-                if (f->type == 0)
+                if (mmcfs_file_is_null(f))
                     break;
+
+                //if (f->type == 0) break;
 
                 uint32_t conflict;
                 err = set_bits(f->block_start, f->block_end, &conflict);
@@ -619,6 +666,8 @@ static esp_err_t init_falloc_bitmap() {
                     pcm_count++;
                     pcm_block_count += f->block_end - f->block_start;
                 }
+
+                
             }
         }
     }
@@ -844,6 +893,19 @@ static mmcfs_file_handle_t _file = NULL;
 mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint32_t mp3_size) {
 
     assert(_file == NULL);
+/*
+    int ret = mmcfs_bucket_read(digest, &bbuf);  
+    if (ret < 0) {
+        return ret;
+    }
+
+    int index = mmcfs_bucket_find_file(&bbuf, mp3_digest);
+    if (index >= 0) {
+        return -EEXIST;
+    } else if (index != -ENOENT) {
+        return index;
+    }
+*/
 
     int mp3_blocks = convert_bytes_to_blocks(mp3_size);
     int pcm_estimated_size = mp3_size / (12 * 1024) * 48000 * 4;
@@ -968,14 +1030,15 @@ int mmcfs_commit_file(mmcfs_file_handle_t file) {
     esp_rom_md5_final(file->calculated_pcm_digest.bytes, &file->pcm_md5_ctx);
 
     char *p1 = (char *)iobuf;
-    sprint_md5_digest(&file->digest, p1, 5);
+    sprint_md5_digest(&file->digest, p1, 4);
     char *p2 = p1 + strlen(p1) + 1;
-    sprint_md5_digest(&file->calculated_mp3_digest, p2, 5);
+    sprint_md5_digest(&file->calculated_mp3_digest, p2, 4);
     char *p3 = p2 + strlen(p2) + 1;
-    sprint_md5_digest(&file->calculated_pcm_digest, p3, 0);
+    sprint_md5_digest(&file->calculated_pcm_digest, p3, 4);
     bool mp3_digest_match = memcmp(&file->digest, &file->calculated_mp3_digest,
                                    sizeof(md5_digest_t)) == 0;
     bool mp3_size_match = (file->mp3_size == file->mp3_written);
+
     ESP_LOGI(TAG,
              "committing mp3+pcm file. \n"
              "\tmp3: %s (expected), %s (actual), %s; "
@@ -1056,10 +1119,14 @@ void mmcfs_pcm_read(const md5_digest_t * digest, int pos, int half) {
     mmcfs_file_t *file = &bbuf.files[index];
     uint32_t frames = file->size / 8192;
     if (pos < frames) {
-        uint32_t sector_start = file->block_start + pos * 8192 / 512;
+        uint32_t file_block_start =
+            fs->block_start + file->block_start * fs->block_sect;
+
+        uint32_t sector_start = file_block_start + pos * 8192 / 512;
         uint32_t sector_count = 8192 / 512;
-        esp_err_t err = sdmmc_read_sectors(
-            card, half == 0 ? iobuf : &iobuf[8192], sector_start, sector_count);
+        uint8_t *buf = half == 0 ? iobuf : &iobuf[8192];
+        esp_err_t err =
+            sdmmc_read_sectors(card, buf, sector_start, sector_count);
         if (err == ESP_OK) {
             return;
         }
@@ -1069,7 +1136,7 @@ zero:
     memset(half == 0 ? iobuf : &iobuf[8192], 0, 8192);
 }
 
-void mmcfs_mix_pcm(const md5_digest_t *digest1, int pos1,
+void mmcfs_pcm_mix(const md5_digest_t *digest1, int pos1,
                    const md5_digest_t *digest2, int pos2, char buf[8192]) {
     if (digest1 == NULL && digest2 == NULL) {
         memset(buf, 0, 8192);
@@ -1077,7 +1144,12 @@ void mmcfs_mix_pcm(const md5_digest_t *digest1, int pos1,
     }
 
     if (digest1 != NULL && digest2 != NULL) {
-        return;     
+        mmcfs_pcm_read(digest1, pos1, 0);
+        mmcfs_pcm_read(digest2, pos2, 0);
+        for (int i = 0; i < FRAME_DAT_SIZE; i++) {
+            
+        }  
+        return;
     }
 
     if (digest1 != NULL) {
@@ -1087,6 +1159,8 @@ void mmcfs_mix_pcm(const md5_digest_t *digest1, int pos1,
     } 
 
     if (digest2 != NULL) {
-        
+        mmcfs_pcm_read(digest2, pos2, 0);
+        memcpy(buf, iobuf, 8192); 
+        return;
     }
 }
