@@ -890,22 +890,22 @@ static mmcfs_file_handle_t _file = NULL;
  *
  * minimal 96kbps (12KiB/s)
  */
-mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint32_t mp3_size) {
+int mmcfs_create_file(md5_digest_t *digest, uint32_t mp3_size,
+                      mmcfs_file_handle_t *out) {
 
     assert(_file == NULL);
-/*
+
     int ret = mmcfs_bucket_read(digest, &bbuf);  
     if (ret < 0) {
         return ret;
     }
 
-    int index = mmcfs_bucket_find_file(&bbuf, mp3_digest);
+    int index = mmcfs_bucket_find_file(&bbuf, digest);
     if (index >= 0) {
         return -EEXIST;
     } else if (index != -ENOENT) {
         return index;
     }
-*/
 
     int mp3_blocks = convert_bytes_to_blocks(mp3_size);
     int pcm_estimated_size = mp3_size / (12 * 1024) * 48000 * 4;
@@ -913,13 +913,13 @@ mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint32_t mp3_size) {
 
     uint32_t mp3_start = allocate_blocks(mp3_blocks);
     if (mp3_start == -1) {
-        return NULL; // this is critical error !!! TODO
+        return -1; // this is critical error !!! TODO
     }
 
     uint32_t pcm_start = allocate_blocks(pcm_estimated_blocks);
     if (pcm_start == -1) {
         assert(ESP_OK == clear_bits(mp3_start, mp3_start + mp3_blocks, NULL));
-        return NULL; // this is also critical error !!! TODO
+        return -1; // this is also critical error !!! TODO
     }
 
     mmcfs_file_context_t *file =
@@ -945,7 +945,8 @@ mmcfs_file_handle_t mmcfs_create_file(md5_digest_t *digest, uint32_t mp3_size) {
     }
 
     _file = file;
-    return file;
+    *out = file;
+    return 0;
 }
 
 void mmcfs_abort_file(mmcfs_file_handle_t file) {

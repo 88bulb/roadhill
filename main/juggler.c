@@ -87,11 +87,13 @@ again:
 
     if (tr0) {
         mmcfs_finfo_t info;
-        int res = mmcfs_stat(&tr0->digest, &info);
-        assert(res != EINVAL);
+        mmcfs_file_handle_t file;
 
-        if (res == -ENOENT) {
-            file = mmcfs_create_file(&tr0->digest, tr0->size);
+        int ret = mmcfs_stat(&tr0->digest, &info);
+        assert(ret != EINVAL);
+
+        if (ret == -ENOENT) {
+            ret = mmcfs_create_file(&tr0->digest, tr0->size, &file);
             // TODO in case of file is NULL
 
             // start picman and pacman
@@ -109,11 +111,13 @@ again:
 
     if (tr1) {
         mmcfs_finfo_t info;
-        int res = mmcfs_stat(&tr1->digest, &info);
-        assert(res != EINVAL);
+        mmcfs_file_handle_t file;
 
-        if (res == -ENOENT) {
-            file = mmcfs_create_file(&tr0->digest, tr0->size);
+        int ret = mmcfs_stat(&tr1->digest, &info);
+        assert(ret != EINVAL);
+
+        if (ret == -ENOENT) {
+            ret = mmcfs_create_file(&tr0->digest, tr0->size, &file);
             // TODO in case of file is NULL
 
             // start picman and pacman
