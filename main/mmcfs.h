@@ -198,6 +198,6 @@ typedef struct {
 
 int mmcfs_stat(const md5_digest_t* digest, mmcfs_finfo_t* finfo);
 
-void mmcfs_pcm_mix(const md5_digest_t *digest1, int pos1,
-                   const md5_digest_t *digest2, int pos2, char buf[8192]);
-
+void mmcfs_pcm_mix(const md5_digest_t *digest1, int pos1, int *len1,
+                   const md5_digest_t *digest2, int pos2, int *len2,
+                   char buf[8192]);

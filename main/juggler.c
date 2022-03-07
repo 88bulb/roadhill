@@ -31,6 +31,7 @@ QueueHandle_t jug_in = NULL, jug_out = NULL, pcm_in = NULL, pcm_out = NULL,
 
 /* current job */
 mmcfs_file_handle_t file = NULL;
+mmcfs_finfo_t info;
 
 /* deprecated */
 void track_url_strlcat(char *tracks_url, md5_digest_t digest, size_t size) {
@@ -57,7 +58,6 @@ void die_another_day() {
 
 static void handle_frame_request() {
     frame_request_t *req = NULL;
-
 
 again:
     if (0 == uxQueueMessagesWaiting(jug_in)) {
@@ -86,9 +86,6 @@ again:
     }
 
     if (tr0) {
-        mmcfs_finfo_t info;
-        mmcfs_file_handle_t file;
-
         int ret = mmcfs_stat(&tr0->digest, &info);
         assert(ret != EINVAL);
 
@@ -110,21 +107,18 @@ again:
     }
 
     if (tr1) {
-        mmcfs_finfo_t info;
-        mmcfs_file_handle_t file;
-
         int ret = mmcfs_stat(&tr1->digest, &info);
         assert(ret != EINVAL);
 
         if (ret == -ENOENT) {
-            ret = mmcfs_create_file(&tr0->digest, tr0->size, &file);
+            ret = mmcfs_create_file(&tr1->digest, tr1->size, &file);
             // TODO in case of file is NULL
 
             // start picman and pacman
             picman_inmsg_t cmd = {
                 .url = req->url,
-                .digest = &tr0->digest,
-                .size = tr0->size,
+                .digest = &tr1->digest,
+                .size = tr1->size,
             };
             xQueueSend(pic_in, &cmd, portMAX_DELAY);
             return;
@@ -133,7 +127,8 @@ again:
 
     xQueueReceive(jug_in, &req, 0);
     mmcfs_pcm_mix(tr0 ? &tr0->digest : NULL, tr0 ? req->track_mix[0].pos : 0,
-                  tr1 ? &tr1->digest : NULL, tr1 ? req->track_mix[1].pos : 0,
+                  tr0 ? &tr0->len : NULL, tr1 ? &tr1->digest : NULL,
+                  tr1 ? req->track_mix[1].pos : 0, tr1 ? &tr1->len : NULL,
                   req->buf);
 
     req->res = JUG_REQ_FULFILLED;

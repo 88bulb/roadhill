@@ -147,6 +147,7 @@ static int next_blink = -1;
 static int next_chan0_track = -1;
 static int next_chan1_track = -1;
 */
+
 /*
  *
  */
@@ -170,12 +171,21 @@ void make_request(frame_request_t *req) {
             }
         }
 
-        int a = trac->position / 40;
-        int b = next == NULL ? INT_MAX : next->position / 40;
+        // started
+        bool a = trac->pos <= index;
+        // not finished by end
+        bool b = trac->end == INT_MAX
+                     ? true
+                     : (index < trac->pos + trac->end - trac->begin);
+        // not finished by len
+        bool c = trac->len == 0 ? true : (index < trac->pos + trac->len);
+        // not finished by next track in the same channel
+        bool d = next == NULL ? true : index < next->pos;
 
-        if (a <= index && index < b) {
+        if (a && b && c && d) {
             req->track_mix[0].track = trac;
-            req->track_mix[0].pos = index - a;
+            req->track_mix[0].pos = index - trac->pos;
+            req->track_mix[0].len = 0;
             break;
         }
     }
@@ -194,13 +204,31 @@ void make_request(frame_request_t *req) {
                 break;
             }
         }
-
-        int a = trac->position / 40;
-        int b = next == NULL ? INT_MAX : next->position / 40;
+        /*
+        int a = trac->pos;
+        int b = next == NULL ? INT_MAX : next->pos;
 
         if (a <= index && index < b) {
             req->track_mix[1].track = trac;
             req->track_mix[1].pos = index - a;
+            req->track_mix[1].len = 0;
+            break;
+        } */
+        // started
+        bool a = trac->pos <= index;
+        // not finished by end
+        bool b = trac->end == INT_MAX
+                     ? true
+                     : (index < trac->pos + trac->end - trac->begin);
+        // not finished by len
+        bool c = trac->len == 0 ? true : (index < trac->pos + trac->len);
+        // not finished by next track in the same channel
+        bool d = next == NULL ? true : index < next->pos;
+
+        if (a && b && c && d) {
+            req->track_mix[1].track = trac;
+            req->track_mix[1].pos = index - trac->pos;
+            req->track_mix[1].len = 0;
             break;
         }
     }
@@ -232,15 +260,12 @@ static int read_cb(audio_element_handle_t el, char *buf, int len,
             ESP_LOGI(TAG, "req addr: %p", (void*)req);
 
             xQueueSend(jug_in, &req, portMAX_DELAY);
-            ESP_LOGI(TAG, "initial jug_in request %d", i); 
         }
     }
 
     if (!reading) {
         xQueueReceive(jug_out, &reading, portMAX_DELAY); 
-        
         // ESP_LOGI(TAG, "reading addr: %p", (void*)reading); 
-
         reading_pos = 0;
     }
 
@@ -337,7 +362,6 @@ void player(void *arg) {
     esp_periph_start(set, emitter);
 
     audio_pipeline_set_listener(pipeline, evt);
-
     audio_event_iface_set_listener(esp_periph_set_get_event_iface(set), evt);
 
     // audio_pipeline_run(pipeline);
@@ -468,7 +492,7 @@ void print_frame_request(frame_request_t *req) {
     } else {
         trac = req->track_mix[0].track;
         sprint_md5_digest(&trac->digest, hex_buf, 8);
-        sprintf(b0, "chan 0: %s, size: %d, frmpos: %d", hex_buf, trac->size,
+        sprintf(b0, "chan 0: %s, size: %d, pos: %d", hex_buf, trac->size,
                 req->track_mix[0].pos);
     }
 
@@ -477,7 +501,7 @@ void print_frame_request(frame_request_t *req) {
     } else {
         trac = req->track_mix[1].track;
         sprint_md5_digest(&trac->digest, hex_buf, 8);
-        sprintf(b1, "chan 1: %s, size: %d, frmpos: %d", hex_buf, trac->size,
+        sprintf(b1, "chan 1: %s, size: %d, pos: %d", hex_buf, trac->size,
                 req->track_mix[1].pos);
     }
 

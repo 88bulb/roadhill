@@ -478,10 +478,19 @@ static int process_line() {
                 p->tracks[i].digest = track_name_to_digest(
                     cJSON_GetObjectItem(item, "name")->valuestring);
                 p->tracks[i].size = cJSON_GetObjectItem(item, "size")->valueint;
-                p->tracks[i].position =
+                int position_ms =
                     cJSON_GetObjectItem(item, "position")->valueint;
-                p->tracks[i].begin = cJSON_GetObjectItem(item, "begin")->valueint;
-                p->tracks[i].end = cJSON_GetObjectItem(item, "end")->valueint;
+                p->tracks[i].position_ms = position_ms;
+                p->tracks[i].pos = position_ms / 40;
+                p->tracks[i].len = 0;
+                int begin = cJSON_GetObjectItem(item, "begin")->valueint;
+                if (begin < 0)
+                    begin = 0;
+                p->tracks[i].begin = begin;
+                int end = cJSON_GetObjectItem(item, "end")->valueint;
+                if (end < begin)
+                    end = INT_MAX;
+                p->tracks[i].end = end;
                 p->tracks[i].chan = cJSON_GetObjectItem(item, "chan")->valueint;
             }
         }

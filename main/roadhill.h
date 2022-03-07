@@ -82,17 +82,16 @@ typedef struct {
     /* mp3 file size */
     int size;
 
-    /* audio length, in units of 10 milliseconds (centiseconds).
-     * for 48000Hz sample rate, 16bit and 2 channels, each unit
-     * has 480 * 4 = 1920 bytes.
-     * length is not provided by cloud, it is provided by juggler.
-     */
-    int length;
-
     /*
      * position in milliseconds
      */
-    int position;
+    int position_ms;
+
+    /*
+     *
+     */
+    int pos;
+    int len;
 
     /*
      * begin
@@ -105,6 +104,7 @@ typedef struct {
 typedef struct {
     track_t* track;
     int pos;
+    int len;
 } track_mix_t;
 
 typedef struct {
