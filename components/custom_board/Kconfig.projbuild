@@ -1,0 +1,15 @@
+menu "Custom Audio Board"
+
+choice CUSTOMER_AUDIO_BOARD
+    prompt "custom audio board"
+    default CONNIE_BOARD_V1_0
+    help
+        Select an audio board to use with the ESP-ADF
+
+config CONNIE_BOARD_V1_0
+    bool "Connie board v1.0"
+
+endchoice
+
+endmenu
+

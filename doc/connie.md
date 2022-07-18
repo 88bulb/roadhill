@@ -23,7 +23,7 @@
 | 3             | EN                                      | RESET             | RESET                                                        |                                                              |
 | 4             | SENSOR_VP (GPIO36, ADC1_CH0, RTC_GPIO0  | POWER Button      | REC Button                                                   | input only, RTC wakeup                                       |
 | 5             | SENSOR_VN (GPIO39, ADC1_CH3, RTC_GPIO3) | MODE Button       | MODE Button                                                  | input only                                                   |
-| 6             | IO34 (GPIO34, ADC1_CH6, RTC_GPIO4)      |                   | SD_DET (10k pull-up to 3V3, but not used in driver, SDMMC_SLOT_NO_CD) | input only                                                   |
+| 6             | IO34 (GPIO34, ADC1_CH6, RTC_GPIO4)      | Factory Boot      | SD_DET (10k pull-up to 3V3, but not used in driver, SDMMC_SLOT_NO_CD) | input only                                                   |
 | 7             | IO35                                    | I2S_ASDOUT        | I2S_ASDOUT                                                   |                                                              |
 | 8             | IO32                                    | **Reset C3**      | SET Touch                                                    |                                                              |
 | 9             | IO33                                    | PLAY Button / LED | PLAY Touch                                                   | On "power off", output low                                   |
