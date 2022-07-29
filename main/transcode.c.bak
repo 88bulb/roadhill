@@ -1,0 +1,135 @@
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+#include "esp_err.h"
+#include "esp_log.h"
+
+#include "esp_http_client.h"
+
+#include "audio_element.h"
+#include "audio_pipeline.h"
+#include "audio_event_iface.h"
+#include "audio_mem.h"
+#include "audio_common.h"
+#include "raw_stream.h"
+
+#include "message.h"
+#include "transcode.h"
+
+/*
+ * transcode receives TRANSCODE message via recv_transcode_msg()
+ * and send ADPCM_DATA, TRANSCODE_DONE via send_main_msg()
+ */
+
+/*
+ * len = 0 for NULL terminated.
+ */
+typedef struct {
+  int len;
+  char* data;
+} http_data_t;
+
+typedef struct {
+  char* url;
+  size_t content_length;
+  uint8_t* md5;
+} transcode_ctx_t;
+
+static const char* TAG = "transcode"
+
+/*
+ * http -> mp3_read_cb; all are pointers, len = 0 for end
+ */
+static QueueHandle_t http_data_queue;
+static transcode_ctx_t *ctx;
+
+/*
+ * 
+ */
+static void transcode(void* arg);
+static int mp3_read_cb(audio_element_handle_t el, char* buf, int len,
+  TickType_t wait_time, void *ctx);
+static void rsp_write_cb(audio_element_handle_t el, char* buf, int len,
+  TickType_t wait_time, void *ctx);
+
+static esp_err_t _http_event_handler(esp_http_client_event_t *evt);
+
+static void setup(transcode_t* data);
+static void teardown();
+
+void create_transcode_task(void) {
+   xTaskCreate(transcode, "transcode", 4096, NULL, 10, NULL);
+}
+
+static void transcode(void* arg) {
+  msg_t msg; 
+  http_data_queue = xQueueCreate(4, sizeof(http_data_t));
+
+  transcode_ctx_t *ctx = NULL;
+
+  while (1) {
+    recv_transcode_msg(&msg, true);
+    if (ctx) { // transcoding
+      if (msg.type == TRANSCODE_CANCEL) {
+        // teardown();
+        // send_main_msg();
+      }
+    } else { // idle
+      if (msg.type == TRANSCODE) {
+        transcode_t *data = (transcode_t*)msg.data;
+        ctx->url = data->url;
+        ctx->content_length = data->content_length;
+        ctx->md5 = data->md5;
+        free(msg.data);
+
+        esp_http_client_config_t config = { .url = ctx->url };
+        esp_http_client_handlt_t client = esp_http_client_init(&config);
+
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+          
+        }
+      }
+    }
+  }
+}
+
+static void setup(transcode_t* data) {
+  ctx = (transcode_ctx_t*)malloc(sizeof(transcode_ctx_t));
+  memset(ctx, 0, sizeof(transcode_ctx_t)); 
+
+  
+}
+
+static esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
+  static char *outbuf;
+  static int outlen;
+  switch (evt->event_id) {
+  case HTTP_EVENT_ERROR:
+    ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+    break;
+  case HTTP_EVENT_ON_CONNECTED:
+    ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+    break;
+  case HTTP_EVENT_HEADER_SENT:
+    ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+    break;
+  case HTTP_EVENT_ON_HEADER:
+    ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key,
+             evt->header_value);
+    break;
+  case HTTP_EVENT_ON_DATA:
+    ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+
+  case HTTP_EVENT_ON_FINISH:
+    break;
+  case HTTP_EVENT_DISCONNECTED:
+    break;
+  case HTTP_EVENT_REDIRECT:
+    break;
+  }
+  return ESP_OK;
+}

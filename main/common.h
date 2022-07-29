@@ -1,0 +1,4 @@
+#ifndef APPLICATION_COMMON_H
+#define APPLICATION_COMMON_H
+
+#endif

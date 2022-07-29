@@ -52,29 +52,29 @@ header describes:
 #define MMCFS_MAX_BITARRAY_SIZE (16 * 1024 * 8)
 
 typedef struct mmcfs {
-    uint64_t log_start;
-    uint64_t log_sect; // twice bucket_sect
+  uint64_t log_start;
+  uint64_t log_sect; // twice bucket_sect
 
-    /* starting sector of bucket */
-    uint64_t bucket_start;
-    
-    /* how much sectors for a bucket */
-    uint64_t bucket_sect;
+  /* starting sector of bucket */
+  uint64_t bucket_start;
 
-    /* total buckets number, in current implementation, 4096 */
-    uint64_t bucket_count;
-    uint64_t block_start;
-    uint64_t block_sect;
-    uint64_t block_count;
+  /* how much sectors for a bucket */
+  uint64_t bucket_sect;
+
+  /* total buckets number, in current implementation, 4096 */
+  uint64_t bucket_count;
+  uint64_t block_start;
+  uint64_t block_sect;
+  uint64_t block_count;
 } mmcfs_t;
 
 // superblock is located at sector 2 (aka, 1024 bytes)
 typedef struct __attribute__((packed)) {
-    uint8_t magic[16];
-    uint64_t version;
-    mmcfs_t mmcfs;
-    uint8_t zero_padding[512 - 16 * 2 - sizeof(uint64_t) - sizeof(mmcfs_t)];
-    uint8_t md5[16];
+  uint8_t magic[16];
+  uint64_t version;
+  mmcfs_t mmcfs;
+  uint8_t zero_padding[512 - 16 * 2 - sizeof(uint64_t) - sizeof(mmcfs_t)];
+  uint8_t md5[16];
 } mmcfs_superblock_t;
 
 _Static_assert(sizeof(mmcfs_superblock_t) == 512,
@@ -96,10 +96,10 @@ _Static_assert(sizeof(mmcfs_superblock_t) == 512,
  */
 
 typedef enum __attribute__((packed)) {
-    MMCFS_FILE_UNUSED = 0,
-    MMCFS_FILE_MP3 = 1,
-    MMCFS_FILE_PCM = 2,
-    MMCFS_FILE_MAX = 0xff
+  MMCFS_FILE_UNUSED = 0,
+  MMCFS_FILE_MP3 = 1,
+  MMCFS_FILE_PCM = 2,
+  MMCFS_FILE_MAX = 0xff
 } mmcfs_file_type_t;
 
 _Static_assert(sizeof(mmcfs_file_type_t) == 1,
@@ -109,14 +109,13 @@ _Static_assert(sizeof(mmcfs_file_type_t) == 1,
  * mp3 and pcm subtype are defined in the same space
  */
 typedef enum __attribute__((packed)) {
-    MMCFS_MP3_SUBTYPE_NONE = 0, 
-    MMCFS_PCM_48K_16B_STEREO_OOB_NONE = 0,
-    MMCFS_FILE_SUBTYPE_MAX = 0xff
+  MMCFS_MP3_SUBTYPE_NONE = 0,
+  MMCFS_PCM_48K_16B_STEREO_OOB_NONE = 0,
+  MMCFS_FILE_SUBTYPE_MAX = 0xff
 } mmcfs_file_subtype_t;
 
 _Static_assert(sizeof(mmcfs_file_subtype_t) == 1,
                "mmcfs_file_subtype_t incorrect size");
-
 
 /**
  * There may be three TYPEs of file.
@@ -137,66 +136,65 @@ _Static_assert(sizeof(mmcfs_file_subtype_t) == 1,
  *      packet_position: first or last
  */
 typedef struct __attribute__((packed)) {
-    md5_digest_t self;
+  md5_digest_t self;
 
-    // for mp3 file, this links to pcm;
-    // for pcm file, this links to original mp3 file.
-    // there is no need to have an "option field" denoting
-    // whether this link is used or not, since a "danling"
-    // reference is allowed.
-    md5_digest_t link;
+  // for mp3 file, this links to pcm;
+  // for pcm file, this links to original mp3 file.
+  // there is no need to have an "option field" denoting
+  // whether this link is used or not, since a "danling"
+  // reference is allowed.
+  md5_digest_t link;
 
-    // access is a global monotonously increasing number
-    // it is roughly equivalent to last access time, the larger, the latter
-    uint32_t access;
+  // access is a global monotonously increasing number
+  // it is roughly equivalent to last access time, the larger, the latter
+  uint32_t access;
 
-    // starting block, relative to fs->block_start, in block unit (not sector)
-    // start is inclusive and end is exclusive
-    uint32_t block_start;
-    uint32_t block_end;
+  // starting block, relative to fs->block_start, in block unit (not sector)
+  // start is inclusive and end is exclusive
+  uint32_t block_start;
+  uint32_t block_end;
 
-    // in byte
-    // arbitrary non-zero value for mp3
-    // must be multiple of (pcm + oob) * 512 for pcm
-    uint32_t size;
+  // in byte
+  // arbitrary non-zero value for mp3
+  // must be multiple of (pcm + oob) * 512 for pcm
+  uint32_t size;
 
-    //
-    mmcfs_file_type_t type;     // 0 for unused, 1 for mp3, 2 for pcm
-    mmcfs_file_subtype_t subtype;  // 
+  //
+  mmcfs_file_type_t type;       // 0 for unused, 1 for mp3, 2 for pcm
+  mmcfs_file_subtype_t subtype; //
 
-    // for mp3, both are zero
-    // for pcm, pcm is modelled as a packet stream, not a
-    uint8_t pcm_sect;
-    uint8_t oob_sect;
+  // for mp3, both are zero
+  // for pcm, pcm is modelled as a packet stream, not a
+  uint8_t pcm_sect;
+  uint8_t oob_sect;
 
-    uint32_t zero[3];
+  uint32_t zero[3];
 } mmcfs_file_t;
 
 _Static_assert(sizeof(mmcfs_file_t) == 64, "mmc_file_t size incorrect");
 
 typedef struct {
-    mmcfs_file_t files[16];
+  mmcfs_file_t files[16];
 } mmcfs_bucket_t;
 
 _Static_assert(sizeof(mmcfs_bucket_t) == 1024, "mmc_bucket_t size incorrect");
 
-
 typedef struct mmcfs_file_context mmcfs_file_context_t;
-typedef mmcfs_file_context_t* mmcfs_file_handle_t;
+typedef mmcfs_file_context_t *mmcfs_file_handle_t;
 int mmcfs_create_file(md5_digest_t *digest, uint32_t mp3_size,
                       mmcfs_file_handle_t *out);
-int mmcfs_write_mp3(mmcfs_file_handle_t file, char* buf, size_t len);
-int mmcfs_write_pcm(mmcfs_file_handle_t file, char* buf, size_t len);
+int mmcfs_write_mp3(mmcfs_file_handle_t file, char *buf, size_t len);
+int mmcfs_write_pcm(mmcfs_file_handle_t file, char *buf, size_t len);
 int mmcfs_commit_file(mmcfs_file_handle_t file);
 
 typedef struct {
-    int mp3_state;  // 0, none (maybe link only), 1, partial, 2, full
-    int pcm_state;  // 0, none, 1, partial, 2, full
-    int pcm_format;  
-    int fft_format;    
+  int mp3_state; // 0, none (maybe link only), 1, partial, 2, full
+  int pcm_state; // 0, none, 1, partial, 2, full
+  int pcm_format;
+  int fft_format;
 } mmcfs_finfo_t;
 
-int mmcfs_stat(const md5_digest_t* digest, mmcfs_finfo_t* finfo);
+int mmcfs_stat(const md5_digest_t *digest, mmcfs_finfo_t *finfo);
 
 void mmcfs_pcm_mix(const md5_digest_t *digest1, int pos1, int *len1,
                    const md5_digest_t *digest2, int pos2, int *len2,
