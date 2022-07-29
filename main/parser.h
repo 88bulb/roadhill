@@ -20,8 +20,6 @@
  *          "name":"68da94e8526e2d669f77d07d65fd4845",
  *          "size":1655788,
  *          "time":0,
- *          "begin":0,
- *          "end":0,
  *          "repeat":1,
  *          "chan":0
  *       }
@@ -40,7 +38,6 @@
  * }
  * ```
  */
-
 typedef struct blink {
   int time;
   uint8_t mask[2];
@@ -55,24 +52,23 @@ typedef struct track {
   int crop_end;
 } track_t;
 
-typedef enum align_type {
-  ALIGN_BEGIN,
-  ALIGN_END,
-} align_type_t;
+typedef struct group group_t;
 
-typedef struct mentry mentry_t;
+// TODO support repeat
+struct group {
+  group_t* parent;
+  int time;
 
-struct __attribute__((packed)) group_entry {
-  TAILQ_ENTRY(track_entry) entries;
+  group_t* children;
+  int children_array_size;
+ 
+  track_t* tracks;
+  int tracks_array_size;
 
-  uint8_t repeat;         
-
-  mentry_t* origin;         // mentry
-  int32_t pos;            // only non-negative value supported now
+  blink_t* blinks;
+  int blinks_array_size;  
 };
 
-TAILQ_HEAD(mtailhead, mentry);
-
-typedef struct mtailhead mtailhead_t;
+bool parse_blink_object(cJSON *obj, blink_t *blink);
 
 #endif

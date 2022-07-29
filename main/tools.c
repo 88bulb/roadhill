@@ -7,8 +7,6 @@
 
 #include "tools.h"
 
-
-
 /* 32 hex + .mp3 suffix */
 #define FILENAME_LEN (32 + 4)
 
@@ -36,23 +34,38 @@ char hex_char_to_half_byte(char c) {
 /*
  * Convert hex string to byte array
  * 
- * @param hex_str - input string buffer
- * @param bytes - output buffer, if null, dryrun and len/max_len irrelevant
- * @param len - input, byte len
+ * @param [in]  hex_str Input string buffer
+ * @param [out] buf     Output buffer, if null, dryrun.
+ * @param [out] len     Output length
+ * @param [in]  maxlen  Max output lengnth 
  * @return true for success
  */
-bool hex_string_to_bytes(const char *hex_str, uint8_t *bytes, int len) {
-  if (!hex_str) return false;
+bool hex_string_to_bytes(const char *hex_str, uint8_t *buf, int *len,
+                         int maxlen) {
+  if (!hex_str)
+    return false;
 
-  for (int i = 0; i < len; i++) {
+  size_t slen = strnlen(hex_str, maxlen * 2);
+  if (slen % 2 != 0)
+    return false;
+
+  for (int i = 0; i < slen / 2; i++) {
     uint8_t high = hex_char_to_half_byte(hex_str[i * 2]);
     if (high == INVALID_HEXCHAR)
       return false;
     uint8_t low = hex_char_to_half_byte(hex_str[i * 2 + 1]);
     if (low == INVALID_HEXCHAR)
       return false;
-    bytes[i] = (high << 4) + low;
+
+    if (buf) {
+      buf[i] = (high << 4) + low;
+    }
   }
+
+  if (len) {
+    *len = slen / 2;
+  }
+
   return true;
 }
 
