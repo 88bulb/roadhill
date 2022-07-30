@@ -73,5 +73,7 @@ struct group {
 
 bool parse_blink_object(cJSON *obj, blink_t *blink);
 bool parse_track_object(cJSON *obj, track_t *track);
+bool parse_group_object(cJSON *obj, group_t *group);
+void destroy_group_object(group_t *group);
 
 #endif

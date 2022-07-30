@@ -14,6 +14,8 @@
 #include "tools.h"
 #include "parser.h"
 
+#include "tmalloc.h"
+
 /*
  * general properties:
  * all time units are 1/100 second.
@@ -139,17 +141,17 @@ void destroy_group_object(group_t *group)
     for (int i = 0; i < group->children_array_size; i++) {
       destroy_group_object(&group->children[i]);
     } 
-    free(group->children);
+    tfree(group->children);
     group->children = NULL;
   } 
 
   if (group->tracks) {
-    free(group->tracks);
+    tfree(group->tracks);
     group->tracks = NULL;
   }
 
   if (group->blinks) {
-    free(group->blinks);
+    tfree(group->blinks);
     group->blinks = NULL;
   }
 }
@@ -168,6 +170,10 @@ bool parse_group_object(cJSON *obj, group_t *group) {
   if (!obj)
     return false;
 
+  if (group) {
+    memset(group, 0, sizeof(group_t));
+  }
+
   cJSON *children = cJSON_GetObjectItem(obj, "children");
   if (children) {
     if (!cJSON_IsArray(children)) {
@@ -177,9 +183,9 @@ bool parse_group_object(cJSON *obj, group_t *group) {
     int children_array_size = cJSON_GetArraySize(children);
     int children_array_mem_size = sizeof(group_t) * children_array_size;
 
-    if (group) {    
+    if (group && children_array_size > 0) {    
       group->children_array_size = children_array_size;
-      group->children = (group_t *)malloc(children_array_mem_size);
+      group->children = (group_t *)tmalloc(children_array_mem_size);
       if (group->children == NULL) {
         return false;
       }
@@ -206,7 +212,7 @@ bool parse_group_object(cJSON *obj, group_t *group) {
 
     if (group) {
       group->tracks_array_size = tracks_array_size;
-      group->tracks = (track_t *)malloc(tracks_array_mem_size);
+      group->tracks = (track_t *)tmalloc(tracks_array_mem_size);
       if (group->tracks == NULL) {
         return false;
       }
@@ -233,7 +239,7 @@ bool parse_group_object(cJSON *obj, group_t *group) {
   
     if (group) {
       group->blinks_array_size = blinks_array_size;
-      group->blinks = (blink_t*)malloc(blinks_array_mem_size);
+      group->blinks = (blink_t*)tmalloc(blinks_array_mem_size);
       if (group->blinks == NULL) {
         return false;
       }

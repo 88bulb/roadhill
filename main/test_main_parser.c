@@ -6,6 +6,7 @@
 #include "unity.h"
 
 #include "parser.h"
+#include "tmalloc.h"
 
 static const char *TAG = "testing_parser";
 
@@ -61,6 +62,58 @@ void test_Track()
   TEST_ASSERT_EQUAL_MEMORY(track.md5, name, MD5_SIZE);
 }
 
+void test_ParseEmptyGroupShouldFail_no_time()
+{
+  group_t group;
+  const char jstr[] = "{}";
+  cJSON *obj = cJSON_Parse(jstr);
+  TEST_ASSERT_NOT_NULL(obj);
+  TEST_ASSERT_FALSE(parse_group_object(obj, &group));
+}
+
+void test_ParseGroupWithOnlyTimeShouldSucceed()
+{
+  group_t group;
+  const char jstr[] = "{\"time\":1234}";
+  cJSON *obj = cJSON_Parse(jstr);
+  TEST_ASSERT_NOT_NULL(obj);
+  TEST_ASSERT_TRUE(parse_group_object(obj, &group));
+  TEST_ASSERT_TRUE(group.time == 1234);
+}
+
+void test_ParseGroupWithEmptyChildrenShouldSucceed()
+{
+  group_t group;
+  const char jstr[] = "{"
+                      "\"children\":[],"
+                      "\"time\":1234"
+                      "}";
+
+  cJSON *obj = cJSON_Parse(jstr);
+  TEST_ASSERT_NOT_NULL(obj);
+  TEST_ASSERT_TRUE(parse_group_object(obj, &group));
+  TEST_ASSERT_TRUE(group.time == 1234);
+  TEST_ASSERT_TRUE(group.children_array_size == 0);
+  TEST_ASSERT_NULL(group.children);
+}
+
+void test_ParseGroupWithSingleValidChildShouldSucceed()
+{
+  group_t group;
+  const char jstr[] = "{"
+                      "\"children\":[{"
+                      "\"time\":1234"
+                      "}],"
+                      "\"time\":1234"
+                      "}";
+
+  cJSON *obj = cJSON_Parse(jstr);
+  TEST_ASSERT_NOT_NULL(obj);
+  TEST_ASSERT_TRUE(parse_group_object(obj, &group));
+  destroy_group_object(&group); 
+  TEST_ASSERT_TRUE(tmalloc_no_leak());
+}
+
 void app_main(void) {
   ESP_LOGI(TAG, "testing json started");
 
@@ -68,6 +121,11 @@ void app_main(void) {
   RUN_TEST(test_HelloWorld);
   RUN_TEST(test_Blink);
   RUN_TEST(test_Track);
+  RUN_TEST(test_ParseEmptyGroupShouldFail_no_time);
+  RUN_TEST(test_ParseGroupWithOnlyTimeShouldSucceed);
+  RUN_TEST(test_ParseGroupWithEmptyChildrenShouldSucceed);
+  RUN_TEST(test_ParseGroupWithSingleValidChildShouldSucceed);
+
   UNITY_END();
 
   for (;;) {
