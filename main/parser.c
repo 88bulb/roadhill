@@ -57,11 +57,10 @@ static const char *TAG = "parser";
  * @param 
  */
 bool parse_blink_object(cJSON *obj, blink_t *blink) {
+  int len;
 
   if (!obj)
     return false;
-
-  ESP_LOGI(TAG, "welcome tester");
 
   cJSON *time = cJSON_GetObjectItem(obj, "time");
   if (!time || !cJSON_IsNumber(time) || time->valueint < 0) {
@@ -71,25 +70,26 @@ bool parse_blink_object(cJSON *obj, blink_t *blink) {
 
   cJSON *mask = cJSON_GetObjectItem(obj, "mask");
   if (!mask || !cJSON_IsString(mask) ||
-      !hex_string_to_bytes(mask->valuestring, NULL, 2)) {
+      !hex_string_to_bytes(mask->valuestring, NULL, &len, BLINK_MASK_SIZE) ||
+      len != BLINK_MASK_SIZE) {
     ESP_LOGI(TAG, "error parsing blink.mask");
     return false;
   }
 
   cJSON *code = cJSON_GetObjectItem(obj, "code");
   if (!mask || !cJSON_IsString(code) ||
-      !hex_string_to_bytes(code->valuestring, NULL, 15)) {
+      !hex_string_to_bytes(code->valuestring, NULL, &len, BLINK_CODE_SIZE) ||
+      len != BLINK_CODE_SIZE) {
     ESP_LOGI(TAG, "error parsing blink.code");
     return false;
   }
 
   if (blink) {
     blink->time = time->valueint;
-    hex_string_to_bytes(mask->valuestring, blink->mask, 2);
-    hex_string_to_bytes(code->valuestring, blink->code, 15);
+    hex_string_to_bytes(mask->valuestring, blink->mask, &len, BLINK_MASK_SIZE);
+    hex_string_to_bytes(code->valuestring, blink->code, &len, BLINK_CODE_SIZE);
   }
 
-  ESP_LOGI(TAG, "parsing blink success");
   return true;
 }
 
@@ -101,12 +101,15 @@ bool parse_blink_object(cJSON *obj, blink_t *blink) {
  * @return              True if success.
  */
 bool parse_track_object(cJSON *obj, track_t *track) {
+  int len;
+
   if (!obj)
     return false;
 
   cJSON *name = cJSON_GetObjectItem(obj, "name");
   if (!name || !cJSON_IsString(name) ||
-      !hex_string_to_bytes(name->valuestring, NULL, 16))
+      !hex_string_to_bytes(name->valuestring, NULL, &len, MD5_SIZE) ||
+      len != MD5_SIZE)
     return false;
 
   cJSON *size = cJSON_GetObjectItem(obj, "size");
@@ -118,7 +121,7 @@ bool parse_track_object(cJSON *obj, track_t *track) {
     return false;
 
   if (track) {
-    hex_string_to_bytes(name->valuestring, track->md5.bytes, 16);
+    hex_string_to_bytes(name->valuestring, track->md5, NULL, MD5_SIZE);
     track->size = size->valueint;
     track->time = time->valueint;
   }

@@ -20,8 +20,6 @@
  *          "name":"68da94e8526e2d669f77d07d65fd4845",
  *          "size":1655788,
  *          "time":0,
- *          "repeat":1,
- *          "chan":0
  *       }
  *    ],
  *    "blinks":[
@@ -38,18 +36,22 @@
  * }
  * ```
  */
+
+#define BLINK_MASK_SIZE       2
+#define BLINK_CODE_SIZE       15
+
 typedef struct blink {
   int time;
-  uint8_t mask[2];
-  uint8_t code[15]; 
+  uint8_t mask[BLINK_MASK_SIZE];
+  uint8_t code[BLINK_CODE_SIZE]; 
 } blink_t;
 
+#define MD5_SIZE              16
+
 typedef struct track {
-  md5_digest_t md5;
+  uint8_t md5[MD5_SIZE];
   size_t size;
   int time;
-  int crop_begin;
-  int crop_end;
 } track_t;
 
 typedef struct group group_t;
@@ -70,5 +72,6 @@ struct group {
 };
 
 bool parse_blink_object(cJSON *obj, blink_t *blink);
+bool parse_track_object(cJSON *obj, track_t *track);
 
 #endif

@@ -22,24 +22,52 @@ void test_Blink()
   
   const char jstr[] = "{"
                       "\"time\":68800,"
-                      "\"mask\":\"ffff\","
-                      "\"code\":\"100200000000000000000000000000\""
+                      "\"mask\":\"ee0f\","
+                      "\"code\":\"00112233445566778899aabbccddeeff\""
                       "}";
+  const uint8_t mask[BLINK_MASK_SIZE] = {0xee, 0x0f};
+  const uint8_t code[BLINK_CODE_SIZE] = {0x00, 0x11, 0x22, 0x33, 0x44,
+                                         0x55, 0x66, 0x77, 0x88, 0x99,
+                                         0xaa, 0xbb, 0xcc, 0xdd, 0xee};
+
   cJSON *obj = cJSON_Parse(jstr);
-  TEST_ASSERT_NOT_NULL(obj)
+  TEST_ASSERT_NOT_NULL(obj);
   TEST_ASSERT_TRUE(parse_blink_object(obj, &blink));
+  TEST_ASSERT_TRUE(blink.time == 68800);
+  TEST_ASSERT_EQUAL_MEMORY(blink.mask, mask, BLINK_MASK_SIZE);
+  TEST_ASSERT_EQUAL_MEMORY(blink.code, code, BLINK_CODE_SIZE);
   cJSON_Delete(obj);
 }
 
+void test_Track()
+{
+  track_t track;
+  
+  const char jstr[] = "{"
+                      "\"name\":\"68da94e8526e2d669f77d07d65fd4845\","
+                      "\"size\":1655788,"
+                      "\"time\":400"
+                      "}";
+
+  const uint8_t name[MD5_SIZE] = {0x68, 0xda, 0x94, 0xe8, 0x52, 0x6e,
+                                  0x2d, 0x66, 0x9f, 0x77, 0xd0, 0x7d,
+                                  0x65, 0xfd, 0x48, 0x45};
+
+  cJSON *obj = cJSON_Parse(jstr);
+  TEST_ASSERT_NOT_NULL(obj);
+  TEST_ASSERT_TRUE(parse_track_object(obj, &track));
+  TEST_ASSERT_TRUE(track.size == 1655788);
+  TEST_ASSERT_TRUE(track.time == 400);
+  TEST_ASSERT_EQUAL_MEMORY(track.md5, name, MD5_SIZE);
+}
+
 void app_main(void) {
-  ESP_LOGI(TAG, "testing json parser started");
+  ESP_LOGI(TAG, "testing json started");
 
   UNITY_BEGIN();
   RUN_TEST(test_HelloWorld);
-
-  ESP_LOGI(TAG, "testing json parser working in progress");
-
   RUN_TEST(test_Blink);
+  RUN_TEST(test_Track);
   UNITY_END();
 
   for (;;) {
