@@ -74,10 +74,9 @@ void app_main(void) {
   wifi_config_t wifi_config = {
       .sta =
           {
-              .ssid = TEST_WIFI_SSID, .password = TEST_WIFI_PASSWORD,
-              // .threshold.authmode =
-              //              ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD, .sae_pwe_h2e =
-              //              2,
+              .ssid = TEST_WIFI_SSID,
+              .password = TEST_WIFI_PASSWORD,
+              .threshold.authmode = WIFI_AUTH_WPA2_PSK,
           },
   };
 
